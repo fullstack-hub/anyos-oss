@@ -1,0 +1,22 @@
+diff --git a/lib/crau/crau.h b/lib/crau/crau.h
+index 53d33555be3b47aa387502a5471ef03683421186..a580532684e728c44ce292f8a8b973a5c1489c55 100644
+--- a/lib/crau/crau.h
++++ b/lib/crau/crau.h
+@@ -255,10 +255,16 @@ void crau_data(struct crau_context_stack_st *stack, ...)
+ #    if __has_c_attribute (__maybe_unused__)
+ #     define CRAU_MAYBE_UNUSED [[__maybe_unused__]]
+ #    endif
+-#   elif defined(__GNUC__)
++#   endif
++#  endif /* CRAU_MAYBE_UNUSED */
++#  ifndef CRAU_MAYBE_UNUSED
++#   ifdef __GNUC__
+ #    define CRAU_MAYBE_UNUSED __attribute__((__unused__))
+ #   endif
+ #  endif /* CRAU_MAYBE_UNUSED */
++#  ifndef CRAU_MAYBE_UNUSED
++#   define CRAU_MAYBE_UNUSED
++#  endif /* CRAU_MAYBE_UNUSED */
+ 
+ void crau_push_context(struct crau_context_stack_st *stack CRAU_MAYBE_UNUSED,
+ 		       long context CRAU_MAYBE_UNUSED)

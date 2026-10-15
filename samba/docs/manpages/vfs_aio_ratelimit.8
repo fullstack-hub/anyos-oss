@@ -1,0 +1,166 @@
+'\" t
+.\"     Title: vfs_aio_ratelimit
+.\"    Author: [see the "AUTHOR" section]
+.\" Generator: DocBook XSL Stylesheets vsnapshot <http://docbook.sf.net/>
+.\"      Date: 09/09/2026
+.\"    Manual: System Administration tools
+.\"    Source: Samba 4.24.7
+.\"  Language: English
+.\"
+.TH "VFS_AIO_RATELIMIT" "8" "09/09/2026" "Samba 4\&.24\&.7" "System Administration tools"
+.\" -----------------------------------------------------------------
+.\" * Define some portability stuff
+.\" -----------------------------------------------------------------
+.\" ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+.\" http://bugs.debian.org/507673
+.\" http://lists.gnu.org/archive/html/groff/2009-02/msg00013.html
+.\" ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+.ie \n(.g .ds Aq \(aq
+.el       .ds Aq '
+.\" -----------------------------------------------------------------
+.\" * set default formatting
+.\" -----------------------------------------------------------------
+.\" disable hyphenation
+.nh
+.\" disable justification (adjust text to left margin only)
+.ad l
+.\" -----------------------------------------------------------------
+.\" * MAIN CONTENT STARTS HERE *
+.\" -----------------------------------------------------------------
+.SH "NAME"
+vfs_aio_ratelimit \- Implement async\-I/O rate\-limiting for Samba
+.SH "SYNOPSIS"
+.HP \w'\ 'u
+vfs objects = aio_ratelimit
+.SH "DESCRIPTION"
+.PP
+This VFS module is part of the
+\fBsamba\fR(7)
+suite\&.
+.PP
+The
+aio_ratelimit
+VFS module enables run\-time rate\-limiting on specific shares by enforcing upper limit on async I/O operations\&. An administrator may define this limit as operations per\-second or bytes\-per\-second\&. When one of those limits is exceeded, a delay value (in microseconds) is calculated based on current I/O load and injected to async I/O operations, yielding an implicit throughput ceiling\&.
+.PP
+A configurable burst allowance is supported via a burst multiplier, allowing short\-term bursts above the steady\-state rate while still enforcing a long\-term ceiling\&. Rate\-limiter state is periodically persisted to a local TDB, allowing limits to be enforced consistently across client reconnects and smbd restarts\&.
+.PP
+This module operates only on asynchronous VFS READ/WRITE operation\&.
+.PP
+This module is stackable\&.
+.SH "CONFIGURATION"
+.PP
+Straight forward use:
+.sp
+.if n \{\
+.RS 4
+.\}
+.nf
+	\fI[share]\fR
+	\m[blue]\fBpath = /path/to/share\fR\m[]
+	\m[blue]\fBvfs objects = aio_ratelimit\fR\m[]
+.fi
+.if n \{\
+.RE
+.\}
+.SH "OPTIONS"
+.PP
+aio_ratelimit:read_iops_limit = count
+.RS 4
+Upper limit of READ operations\-per\-second before injecting delays\&. Zero value implies no limit\&.
+.sp
+Default: 0, Max: 1000000
+.sp
+Example: aio_ratelimit:read_iops_limit = 1000
+.RE
+.PP
+aio_ratelimit:read_bw_limit = count
+.RS 4
+Upper limit of READ bandwidth (bytes\-per\-second) before injecting delays\&. Zero value implies no limit\&. Supports size suffixes (K, M, G, T)\&.
+.sp
+Default: 0, Max: 1T
+.sp
+Example: aio_ratelimit:read_bw_limit = 2M
+.RE
+.PP
+aio_ratelimit:read_burst_mult = value
+.RS 4
+Burst multiplier for READ operations, expressed in tenths (e\&.g\&., 15 = 1\&.5x)\&. Defines the token bucket capacity as a multiple of the rate limit, allowing short\-term bursts above the steady\-state rate\&.
+.sp
+Default: 15 (1\&.5x), Max: 100 (10x)
+.sp
+Example: aio_ratelimit:read_burst_mult = 20
+.RE
+.PP
+aio_ratelimit:write_iops_limit = count
+.RS 4
+Upper limit of WRITE operations\-per\-second before injecting delays\&. Zero value implies no limit\&.
+.sp
+Default: 0, Max: 1000000
+.sp
+Example: aio_ratelimit:write_iops_limit = 1000
+.RE
+.PP
+aio_ratelimit:write_bw_limit = count
+.RS 4
+Upper limit of WRITE bandwidth (bytes\-per\-second) before injecting delays\&. Zero value implies no limit\&. Supports size suffixes (K, M, G, T)\&.
+.sp
+Default: 0, Max: 1T
+.sp
+Example: aio_ratelimit:write_bw_limit = 1M
+.RE
+.PP
+aio_ratelimit:write_burst_mult = value
+.RS 4
+Burst multiplier for WRITE operations, expressed in tenths (e\&.g\&., 15 = 1\&.5x)\&. Defines the token bucket capacity as a multiple of the rate limit, allowing short\-term bursts above the steady\-state rate\&.
+.sp
+Default: 15 (1\&.5x), Max: 100 (10x)
+.sp
+Example: aio_ratelimit:write_burst_mult = 15
+.RE
+.SH "BURST BEHAVIOR"
+.PP
+The
+read_burst_mult
+and
+write_burst_mult
+parameters control the maximum burst capacity of the rate limiter relative to the configured rate limits\&. The effective burst capacity is calculated as:
+\fIrate_limit * (burst_mult / 10)\fR\&.
+.PP
+For example, with
+read_iops_limit = 1000
+and
+read_burst_mult = 15, the burst capacity is 1000 * 1\&.5 = 1500 IOPS\&.
+.PP
+This allows short\-term I/O bursts above the steady\-state rate while still enforcing the configured long\-term limit\&.
+.PP
+The appropriate burst multiplier depends on workload characteristics\&. Workloads with larger or more variable asynchronous I/O requests may require a higher burst value to avoid premature throttling, while smaller or latency\-sensitive workloads may benefit from lower values\&.
+.if n \{\
+.sp
+.\}
+.RS 4
+.it 1 an-trap
+.nr an-no-space-flag 1
+.nr an-break-flag 1
+.br
+.ps +1
+\fBNote\fR
+.ps -1
+.br
+.PP
+The
+read_burst_mult
+and
+write_burst_mult
+parameters do not change the long\-term average throughput, which remains limited by
+read_iops_limit/read_bw_limit
+and
+write_iops_limit/write_bw_limit
+respectively\&. Higher burst values only affect initial acceleration and recovery from idle periods\&.
+.sp .5v
+.RE
+.SH "VERSION"
+.PP
+This man page is part of version 4\&.24\&.7 of the Samba suite\&.
+.SH "AUTHOR"
+.PP
+The original Samba software and related utilities were created by Andrew Tridgell\&. Samba is now developed by the Samba Team as an Open Source project similar to the way the Linux kernel is developed\&.

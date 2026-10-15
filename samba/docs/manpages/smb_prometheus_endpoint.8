@@ -1,0 +1,64 @@
+'\" t
+.\"     Title: smb_prometheus_endpoint
+.\"    Author: [see the "AUTHOR" section]
+.\" Generator: DocBook XSL Stylesheets vsnapshot <http://docbook.sf.net/>
+.\"      Date: 09/09/2026
+.\"    Manual: System Administration tools
+.\"    Source: Samba 4.24.7
+.\"  Language: English
+.\"
+.TH "SMB_PROMETHEUS_ENDPO" "8" "09/09/2026" "Samba 4\&.24\&.7" "System Administration tools"
+.\" -----------------------------------------------------------------
+.\" * Define some portability stuff
+.\" -----------------------------------------------------------------
+.\" ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+.\" http://bugs.debian.org/507673
+.\" http://lists.gnu.org/archive/html/groff/2009-02/msg00013.html
+.\" ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+.ie \n(.g .ds Aq \(aq
+.el       .ds Aq '
+.\" -----------------------------------------------------------------
+.\" * set default formatting
+.\" -----------------------------------------------------------------
+.\" disable hyphenation
+.nh
+.\" disable justification (adjust text to left margin only)
+.ad l
+.\" -----------------------------------------------------------------
+.\" * MAIN CONTENT STARTS HERE *
+.\" -----------------------------------------------------------------
+.SH "NAME"
+smb_prometheus_endpoint \- Make Samba profiling information available to prometheus\&.
+.SH "SYNOPSIS"
+.HP \w'\ 'u
+smb_prometheus_endpoint [\-a\ ADDRESS] [\-p\ PORT] [smbprofile\&.tdb]
+.SH "DESCRIPTION"
+.PP
+This tool is part of the
+\fBsamba\fR(8)
+suite\&.
+.PP
+Make the Samba profiling information available to prometheus via http\&.
+.SH "OPTIONS"
+.PP
+\-a ADDRESS
+.RS 4
+The address which
+smb_prometheus_endpoint
+shall listen on, default is 127\&.0\&.0\&.1\&.
+.RE
+.PP
+\-p PORT
+.RS 4
+The port which
+smb_prometheus_endpoint
+shall listen on, default is port 9922\&.
+.RE
+.PP
+smbprofile\&.tdb
+.RS 4
+The full path to the system\*(Aqs smbprofile\&.tdb where Samba stores its statistics\&.
+.RE
+.SH "AUTHOR"
+.PP
+The original Samba software and related utilities were created by Andrew Tridgell\&. Samba is now developed by the Samba Team as an Open Source project similar to the way the Linux kernel is developed\&.

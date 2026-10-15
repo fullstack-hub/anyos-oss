@@ -1,0 +1,8 @@
+drivers/gpu/drm/virtio from Ubuntu's linux-source-6.8.0 6.8.0-139.139
+(noble-updates, arm64; tarball sha256
+aba4ca1e601f04dbd3dd0958e920b6a7ade1841c01d66ecdd91bca4bfe43d81b), the
+kernel of the AnyOS Ubuntu 24.04 guest. Ubuntu's tree carries two backports
+over upstream v6.8 in this driver (the per-plane-state flush fence and
+virtio_gpu_lock_one_resv_uninterruptible); the AnyOS patch in ../patches
+applies on top of exactly this copy. GPL-2.0 (the kernel's licence), see
+each file's SPDX line.

@@ -1,0 +1,76 @@
+#version 460
+#extension GL_EXT_ray_tracing : require
+#extension GL_EXT_nonuniform_qualifier : require
+#extension GL_KHR_shader_subgroup_shuffle : require
+
+layout(set = 0, binding = 0, std430) writeonly buffer BlahSSBO
+{
+    uint _m0[];
+} Blah;
+
+void main()
+{
+    Blah._m0[gl_LaunchIDEXT.x] = subgroupShuffle(gl_LaunchIDEXT.x, 9u);
+}
+
+
+#if 0
+// SPIR-V disassembly
+; SPIR-V
+; Version: 1.4
+; Generator: Unknown(30017); 21022
+; Bound: 25
+; Schema: 0
+OpCapability Shader
+OpCapability UniformBufferArrayDynamicIndexing
+OpCapability SampledImageArrayDynamicIndexing
+OpCapability StorageBufferArrayDynamicIndexing
+OpCapability StorageImageArrayDynamicIndexing
+OpCapability GroupNonUniformShuffle
+OpCapability RayTracingKHR
+OpCapability RuntimeDescriptorArray
+OpCapability UniformBufferArrayNonUniformIndexing
+OpCapability SampledImageArrayNonUniformIndexing
+OpCapability StorageBufferArrayNonUniformIndexing
+OpCapability StorageImageArrayNonUniformIndexing
+OpExtension "SPV_EXT_descriptor_indexing"
+OpExtension "SPV_KHR_ray_tracing"
+OpMemoryModel Logical GLSL450
+OpEntryPoint RayGenerationKHR %3 "main" %9 %12
+OpName %3 "main"
+OpName %7 "BlahSSBO"
+OpName %9 "Blah"
+OpDecorate %6 ArrayStride 4
+OpMemberDecorate %7 0 Offset 0
+OpDecorate %7 Block
+OpDecorate %9 DescriptorSet 0
+OpDecorate %9 Binding 0
+OpDecorate %9 NonReadable
+OpDecorate %12 BuiltIn LaunchIdKHR
+%1 = OpTypeVoid
+%2 = OpTypeFunction %1
+%5 = OpTypeInt 32 0
+%6 = OpTypeRuntimeArray %5
+%7 = OpTypeStruct %6
+%8 = OpTypePointer StorageBuffer %7
+%9 = OpVariable %8 StorageBuffer
+%10 = OpTypeVector %5 3
+%11 = OpTypePointer Input %10
+%12 = OpVariable %11 Input
+%13 = OpTypePointer Input %5
+%15 = OpConstant %5 0
+%18 = OpConstant %5 9
+%20 = OpConstant %5 3
+%21 = OpTypePointer StorageBuffer %5
+%3 = OpFunction %1 None %2
+%4 = OpLabel
+OpBranch %23
+%23 = OpLabel
+%14 = OpAccessChain %13 %12 %15
+%16 = OpLoad %5 %14
+%19 = OpGroupNonUniformShuffle %5 %20 %16 %18
+%22 = OpAccessChain %21 %9 %15 %16
+OpStore %22 %19
+OpReturn
+OpFunctionEnd
+#endif

@@ -1,0 +1,265 @@
+'\" t
+.\"     Title: vfs_ceph_new
+.\"    Author: [see the "AUTHOR" section]
+.\" Generator: DocBook XSL Stylesheets vsnapshot <http://docbook.sf.net/>
+.\"      Date: 09/09/2026
+.\"    Manual: System Administration tools
+.\"    Source: Samba 4.24.7
+.\"  Language: English
+.\"
+.TH "VFS_CEPH_NEW" "8" "09/09/2026" "Samba 4\&.24\&.7" "System Administration tools"
+.\" -----------------------------------------------------------------
+.\" * Define some portability stuff
+.\" -----------------------------------------------------------------
+.\" ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+.\" http://bugs.debian.org/507673
+.\" http://lists.gnu.org/archive/html/groff/2009-02/msg00013.html
+.\" ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+.ie \n(.g .ds Aq \(aq
+.el       .ds Aq '
+.\" -----------------------------------------------------------------
+.\" * set default formatting
+.\" -----------------------------------------------------------------
+.\" disable hyphenation
+.nh
+.\" disable justification (adjust text to left margin only)
+.ad l
+.\" -----------------------------------------------------------------
+.\" * MAIN CONTENT STARTS HERE *
+.\" -----------------------------------------------------------------
+.SH "NAME"
+vfs_ceph_new \- Utilize features provided by libcephfs low\-level APIs
+.SH "SYNOPSIS"
+.HP \w'\ 'u
+vfs objects = ceph_new
+.SH "DESCRIPTION"
+.PP
+This VFS module is part of the
+\fBsamba\fR(8)
+suite\&.
+.PP
+The
+vfs_ceph_new
+VFS module exposes CephFS specific features for use by Samba\&.
+.PP
+Ceph is a distributed network file system designed to provide excellent performance, reliability, and scalability\&. This is a shared library allowing applications to access a Ceph distributed file system via a POSIX\-like interface\&.
+.PP
+This module can be combined with other modules, but it should be the last module in the
+vfs objects
+list\&. Modules added to this list to the right of the ceph entry may not have any effect at all\&.
+.PP
+vfs_ceph_new
+performs mapping between Windows and POSIX Access Control Lists (ACLs)\&. To ensure correct processing and enforcement of POSIX ACLs, the following Ceph configuration parameters are automatically applied:
+.sp
+.if n \{\
+.RS 4
+.\}
+.nf
+		client acl type = posix_acl
+		fuse default permissions = false
+.fi
+.if n \{\
+.RE
+.\}
+.PP
+\fBNOTE\fR: This is a second implementation of a ceph module which uses libcephfs low\-level APIs (compared to the original
+\fBvfs_ceph\fR(8)
+module which uses path\-based APIs)\&. Using the low\-level API allows more optimized and fine\-grained access to the Ceph storage layer\&.
+.SH "CONFIGURATION"
+.PP
+vfs_ceph_new
+requires that the underlying share path is a Ceph filesystem\&.
+.sp
+.if n \{\
+.RS 4
+.\}
+.nf
+		\fI[share]\fR
+		\m[blue]\fBvfs objects = ceph_new\fR\m[]
+		\m[blue]\fBpath = /non\-mounted/cephfs/path\fR\m[]
+		\m[blue]\fBkernel share modes = no\fR\m[]
+.fi
+.if n \{\
+.RE
+.\}
+.PP
+Since
+vfs_ceph_new
+does not require a filesystem mount, the share
+path
+is treated differently: it is interpreted as an absolute path within the Ceph filesystem on the attached Ceph cluster\&. In a ctdb cluster environment where ctdb manages Samba,
+CTDB_SAMBA_SKIP_SHARE_CHECK=yes
+must be configured to disable local share path checks, otherwise ctdb will not reach a healthy state\&.
+.PP
+Note that currently
+kernel share modes
+have to be disabled in a share running with the CephFS vfs module for file serving to work properly\&.
+.SH "OPTIONS"
+.PP
+ceph_new:config_file = path
+.RS 4
+Allows one to define a ceph configfile to use\&. Empty by default\&.
+.sp
+Example: ceph_new:config_file = /etc/ceph/ceph\&.conf
+.RE
+.PP
+ceph_new:user_id = name
+.RS 4
+Allows one to explicitly set the client ID used for the CephFS mount handle\&. Empty by default (use the libcephfs client default)\&.
+.sp
+Example: ceph_new:user_id = samba
+.RE
+.PP
+ceph_new:filesystem = fs_name
+.RS 4
+Allows one to explicitly select the CephFS file system to use when the Ceph cluster supports more than one file system\&. Empty by default (use the default file system of the Ceph cluster)\&.
+.sp
+Example: ceph_new:filesystem = myfs2
+.RE
+.PP
+ceph_new:proxy = [ yes | no | auto ]
+.RS 4
+Allows one to indicate use of the libcephfs proxy library for optimized resource utilization, allowing more simultaneous client connections\&. Prerequisites include the presence of
+\fIlibcephfs_proxy\&.so\&.X\fR
+shared library file under loadable locations for dynamic linker and an active(running)
+\fIlibcephfsd\fR
+daemon\&.
+.RS
+.sp
+.RS 4
+.ie n \{\
+\h'-04'\(bu\h'+03'\c
+.\}
+.el \{\
+.sp -1
+.IP \(bu 2.3
+.\}
+\fBno\fR
+(default) \- Do not use the proxy library but regular connection through
+\fIlibcephfs\&.so\&.X\fR\&.
+.RE
+.sp
+.RS 4
+.ie n \{\
+\h'-04'\(bu\h'+03'\c
+.\}
+.el \{\
+.sp -1
+.IP \(bu 2.3
+.\}
+\fByes\fR
+\- Always use the proxy library and fail the client connection request if prerequisites are unmet\&.
+.RE
+.sp
+.RS 4
+.ie n \{\
+\h'-04'\(bu\h'+03'\c
+.\}
+.el \{\
+.sp -1
+.IP \(bu 2.3
+.\}
+\fBauto\fR
+\- Attempt to use the proxy library but fall back to the regular cephfs connection if prerequisites are unmet\&.
+.RE
+.sp
+.RE
+.RE
+.PP
+ceph_new:fscrypt = [ disabled | none | keybridge ]
+.RS 4
+Configures the CephFS client to enable FSCrypt\-style encrypted (sub\-)volume support\&. If enabled, encryption is applied automatically to empty shares and future connections to said share will require FSCrypt with the same key material\&.
+.RS
+.sp
+.RS 4
+.ie n \{\
+\h'-04'\(bu\h'+03'\c
+.\}
+.el \{\
+.sp -1
+.IP \(bu 2.3
+.\}
+\fBdisabled\fR
+(default) \- FSCrypt support is disabled\&.
+.RE
+.sp
+.RS 4
+.ie n \{\
+\h'-04'\(bu\h'+03'\c
+.\}
+.el \{\
+.sp -1
+.IP \(bu 2.3
+.\}
+\fBnone\fR
+\- An alias for
+\fBdisabled\fR\&.
+.RE
+.sp
+.RS 4
+.ie n \{\
+\h'-04'\(bu\h'+03'\c
+.\}
+.el \{\
+.sp -1
+.IP \(bu 2.3
+.\}
+\fBkeybridge\fR
+\- Enable CephFS FSCrypt support using the keybridge RPC API for fetching key material\&. Setting this option requires that the options
+\fBceph_new:keybridge socket\fR,
+\fBceph_new:keybridge scope\fR, and
+\fBceph_new:keybridge name\fR
+be specified\&.
+.RE
+.sp
+.RE
+.RE
+.PP
+ceph_new:keybridge socket = type:path
+.RS 4
+Configures the CephFS FSCrypt support to communicate with a KeyBridge server listening to the provided socket\&. The KeyBridge server uses the varlink KeyBridge protocol to fetch key material from one or more key distribution services, such as KMIP for example\&.
+.sp
+The only permitted type is
+\fBunix\fR\&. The path value is a path to a unix domain socket for a keybridge server\&. For example: unix:/run/keybridge/keybridge\&.sock
+.sp
+If specified, this option requires the options
+\fBceph_new:keybridge scope\fR
+and
+\fBceph_new:keybridge name\fR
+to be specified\&.
+.RE
+.PP
+ceph_new:keybridge scope = scope
+.RS 4
+Set the scope value for KeyBridge API requests\&. The scope identifies a context for keys, typically mapping to a particular backend\&. The available scope values depend on the configuration of the KeyBridge server\&. For example: "kmip\&.testing"\&.
+.sp
+If specified, this option requires the options
+\fBceph_new:keybridge socket\fR
+and
+\fBceph_new:keybridge name\fR
+to be specified\&.
+.RE
+.PP
+ceph_new:keybridge name = name
+.RS 4
+Set the name value for KeyBridge API requests\&. The name or identifier for a key, within a scope, that the KeyBridge server will be use to "unlock" the encryption for this share\&. For example: "volume1"\&.
+.sp
+If specified, this option requires the options
+\fBceph_new:keybridge socket\fR
+and
+\fBceph_new:keybridge scope\fR
+to be specified\&.
+.RE
+.PP
+ceph_new:keybridge kind = [ B64 | VALUE ]
+.RS 4
+Set the kind of the data field for KeyBridge API requests\&. A KeyBridge server is capable of data exchange using either Base64 encoded strings (B64) or plain text (VALUE)\&. Depending on the scope, a server may be able to fetch key material in one form or the other\&. Use this option to manually select the data kind\&.
+.sp
+If unspecified, B64 will be used\&.
+.RE
+.SH "VERSION"
+.PP
+This man page is part of version 4\&.24\&.7 of the Samba suite\&.
+.SH "AUTHOR"
+.PP
+The original Samba software and related utilities were created by Andrew Tridgell\&. Samba is now developed by the Samba Team as an Open Source project similar to the way the Linux kernel is developed\&.

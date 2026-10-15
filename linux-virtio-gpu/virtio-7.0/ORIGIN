@@ -1,0 +1,24 @@
+drivers/gpu/drm/virtio from Ubuntu's linux-hwe-7.0 7.0.0-34.34~24.04.1
+(noble-updates source package, the kernel the Ubuntu 24.04.5 desktop ISO
+installs; Ubuntu 26.04 ships the same 7.0.0-34): upstream v7.0 from
+linux-hwe-7.0_7.0.0.orig.tar.gz (sha256
+c6343795c8c7e4feff55f5b309365c8e0eaf49cd6abcb412e32315313f149536) with the
+driver's hunks of linux-hwe-7.0_7.0.0-34.34~24.04.1.diff.gz (sha256
+81b9d83f6863ea9d41bde191923134fe6bf4261bfcf94a376b85c094fafd6c32) applied:
+the uninterruptible resv lock for plane flushes, the atomic-only shutdown,
+the fence-chain put on a failed wait and blob import with virgl. Upstream
+7.0 already registers DRM vblank support and ticks it from the DRM vblank
+timer at the mode's rate; the AnyOS patch in ../patches-7.0 replaces that
+tick with the host-driven one when the engine offers it. GPL-2.0 (the
+kernel's licence), see each file's SPDX line.
+
+CentOS Stream 10 (gitlab.com/redhat/centos-stream/src/kernel/centos-stream-10)
+carries this same driver: drivers/gpu/drm/virtio at every tag from
+kernel-6.12.0-262.el10 (commit f0b99f65c7a5f3f346b38ed0d38798efa05dbf0e)
+through kernel-6.12.0-275.el10 (commit
+e2cfc9d2e9cb4c143b510e91efad5fa9448dba8a) is byte-identical to the files
+here, fetched file by file and compared 2026-10-13; kernel-6.12.0-261.el10
+(commit 619fbe8f949d6a17649454b1a8a9b54cda1fb1a8) differs in virtgpu_drv.c,
+virtgpu_drv.h, virtgpu_gem.c, virtgpu_plane.c, virtgpu_prime.c and
+virtgpu_submit.c. install.sh maps 6.12.0-NNN.el10 kernels with NNN >= 262 to
+this variant.

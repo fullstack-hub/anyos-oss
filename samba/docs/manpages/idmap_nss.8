@@ -1,0 +1,70 @@
+'\" t
+.\"     Title: idmap_nss
+.\"    Author: [see the "AUTHOR" section]
+.\" Generator: DocBook XSL Stylesheets vsnapshot <http://docbook.sf.net/>
+.\"      Date: 09/09/2026
+.\"    Manual: System Administration tools
+.\"    Source: Samba 4.24.7
+.\"  Language: English
+.\"
+.TH "IDMAP_NSS" "8" "09/09/2026" "Samba 4\&.24\&.7" "System Administration tools"
+.\" -----------------------------------------------------------------
+.\" * Define some portability stuff
+.\" -----------------------------------------------------------------
+.\" ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+.\" http://bugs.debian.org/507673
+.\" http://lists.gnu.org/archive/html/groff/2009-02/msg00013.html
+.\" ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+.ie \n(.g .ds Aq \(aq
+.el       .ds Aq '
+.\" -----------------------------------------------------------------
+.\" * set default formatting
+.\" -----------------------------------------------------------------
+.\" disable hyphenation
+.nh
+.\" disable justification (adjust text to left margin only)
+.ad l
+.\" -----------------------------------------------------------------
+.\" * MAIN CONTENT STARTS HERE *
+.\" -----------------------------------------------------------------
+.SH "NAME"
+idmap_nss \- Samba\*(Aqs idmap_nss Backend for Winbind
+.SH "DESCRIPTION"
+.PP
+The idmap_nss plugin provides a means to map Unix users and groups to Windows accounts\&. This provides a simple means of ensuring that the SID for a Unix user named jsmith is reported as the one assigned to DOMAIN\ejsmith which is necessary for reporting ACLs on files and printers stored on a Samba member server\&.
+.SH "IDMAP OPTIONS"
+.PP
+range = low \- high
+.RS 4
+Defines the available matching UID and GID range for which the backend is authoritative\&. Note that the range acts as a filter\&. Returned UIDs or GIDs by NSS modules that fall outside the range are ignored and the corresponding maps discarded\&. It is intended as a way to avoid accidental UID/GID overlaps between local and remotely defined IDs\&.
+.RE
+.PP
+use_upn = <yes | no>
+.RS 4
+Some NSS modules can return and handle UPNs and/or down\-level logon names (e\&.g\&., DOMAIN\euser or user@REALM)\&.
+.sp
+If this parameter is enabled the returned names from NSS will be parsed and the resulting namespace will be used as the authoritative namespace instead of the IDMAP domain name\&. Also, down\-level logon names will be sent to NSS instead of the plain username to give NSS modules a hint about the user\*(Aqs correct domain\&.
+.sp
+Default: no
+.RE
+.SH "EXAMPLES"
+.PP
+This example shows how to use idmap_nss to obtain the local account ID\*(Aqs for its own domain (SAMBA) from NSS, whilst allocating new mappings for the default domain (*) and any trusted domains\&.
+.sp
+.if n \{\
+.RS 4
+.\}
+.nf
+	[global]
+	idmap config * : backend = tdb
+	idmap config * : range = 1000000\-1999999
+
+	idmap config SAMBA : backend  = nss
+	idmap config SAMBA : range = 1000\-999999
+.fi
+.if n \{\
+.RE
+.\}
+.SH "AUTHOR"
+.PP
+The original Samba software and related utilities were created by Andrew Tridgell\&. Samba is now developed by the Samba Team as an Open Source project similar to the way the Linux kernel is developed\&.

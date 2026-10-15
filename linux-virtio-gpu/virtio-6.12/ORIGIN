@@ -1,0 +1,28 @@
+drivers/gpu/drm/virtio from the upstream stable tree at v6.12.111 (commit
+e2acc2211022246c77740d5df08265cc27eedcc5, fetched file by file from
+git.kernel.org stable/linux.git "plain" at that tag), the kernel series of
+Debian 13 (13.7: 6.12.111+deb13; Debian's patch series for 6.12.107-1 and
+6.12.111-1 touches no file of this driver, so Debian's driver is upstream's).
+v6.12.107 differs from this copy in one line (virtio_gpu_user_framebuffer_create
+returns ERR_PTR(ret) instead of NULL on failure); the rest of the series
+builds this copy unchanged. The AnyOS patch in ../patches-6.12 applies on top
+of exactly this copy. GPL-2.0 (the kernel's licence), see each file's SPDX
+line. sha256 of each file:
+  f56dcb16709a587e6f549e5e811e8b2a8c2323c6ac26bdd407ac436449d592e7  Kconfig
+  b093778baa45116a242fb278c06c8b62d9c1dd5663d79d61233348afe5137222  Makefile
+  dff7ba80109b2e8e5b16a7e0879aaab546b48d0a326f19c4ac2f8b16c82ce1f7  virtgpu_debugfs.c
+  3e69c9b0bd14191009256e9b3b9ff8e2b2170c8e8d2b2d97da81f3b7a9ac2164  virtgpu_display.c
+  57544519a99dd432cc39498048197d5a292e854a9aaf1012e1ede054f87f690f  virtgpu_drv.c
+  4e75ff1c5da3a2001c2a372a2a27db86db99d6f7fd114afcb738a30afbe8f6e9  virtgpu_drv.h
+  83199ad3f23fab434eba62d6cc821939fac4d3967f4ebe7f6b4f0fe73da62fb3  virtgpu_fence.c
+  aef5299dea3bb64937d9bc764641bca2abcd7e6bd28da1445c662d462e56b9d8  virtgpu_gem.c
+  509cc5f489a489849e163fc7947859b7febf15237cb05c620762f69a207d6865  virtgpu_ioctl.c
+  3a74354b85d141c60796671ff428f1a8c7b5b5c623f5d769e85cc03e8541b626  virtgpu_kms.c
+  a26e29eecee86b60b9654cddfc50945bc2c7bd37ce1f669b4f446c62a112d912  virtgpu_object.c
+  81fb8aed2433252c38e98337b3da34c6c18d7793d9beca6af684b75a6c261e10  virtgpu_plane.c
+  c6c137fb93d93530b32c9a8dafd51071628029ab63679f9ddbd758a50f194450  virtgpu_prime.c
+  6d5376aab8f4d8c743473a32f9ab679e90cb74f36a04b9fd295cba813ea27e81  virtgpu_submit.c
+  0f3c8851f7e42743315014d3f9ddfea56b4abfc053305d5f46fd935da45e2ca0  virtgpu_trace.h
+  f076a7c647b7f6a2e36315ba5a56cd7f6e1be98179b98eaf623a9ce72c48443a  virtgpu_trace_points.c
+  73f4ea19d59267017631621f44dd5d7cc68661112a3251abb45dfc23b23f0665  virtgpu_vq.c
+  58561c4bc32b435785608efd057542cd4a37a2697b64f2cb85abb1e8f3649158  virtgpu_vram.c

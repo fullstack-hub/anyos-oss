@@ -1,0 +1,32 @@
+drivers/gpu/drm/virtio from CentOS Stream 10's kernel at tag
+kernel-6.12.0-211.el10 (commit 7de4a4e89f63b47286cefbfbfe085c155d30d2fe,
+gitlab.com/redhat/centos-stream/src/kernel/centos-stream-10, fetched file by
+file), the tree RHEL 10.2 and AlmaLinux 10.2 build their 6.12.0-211.*.el10_2
+kernels from. The kernel number stays 6.12 but Red Hat backports DRM: this
+driver is upstream's of about v6.18 (drm_client_setup, aperture helpers,
+drm_format_info in framebuffer init, the panic helpers, virtio_gpu_shutdown;
+no DRM vblank), not 6.12's, and the headers have hrtimer_setup and no
+hrtimer_init. Built and checked against the 6.12.0-211.7.3.el10_2 and
+6.12.0-211.64.1.el10_2 kernel-devel headers. CentOS Stream 10 from
+kernel-6.12.0-262.el10 on carries a driver identical to ../virtio-7.0 and
+uses that variant (see ../virtio-7.0/ORIGIN). The AnyOS patch in ../patches-el10 applies on top of
+exactly this copy. GPL-2.0 (the kernel's licence), see each file's SPDX line.
+sha256 of each file:
+  35800f0aee18286ae65e004e01cdb94034cad474a62d02f2a562842b9fb96d31  Kconfig
+  b093778baa45116a242fb278c06c8b62d9c1dd5663d79d61233348afe5137222  Makefile
+  dff7ba80109b2e8e5b16a7e0879aaab546b48d0a326f19c4ac2f8b16c82ce1f7  virtgpu_debugfs.c
+  2daaf261c555b0d9147bbf3d4189a61991f4f736d8e9ec2bed07be8f8f77fa76  virtgpu_display.c
+  84f3b0860afbe7c4d4a38171f002e496c632ec9614c39c1bdbe7473cb6da76fb  virtgpu_drv.c
+  a0d4b519277e5fbb753ae0f0af5e5d8e1db152612ad0d5f9d173ad53f5d5f24b  virtgpu_drv.h
+  307141a298e767a0df453763e84ba05ec29331424bf4e1753808fc7040391f74  virtgpu_fence.c
+  fd3f8e597d9ea2b77dbcdcc1658138252ca72c62a596e15964abce5c22367fe6  virtgpu_gem.c
+  d50a2d3eace4169c3fb76788e046e70856ebd4c9d6818b7a7b2a8c4b7490e5c9  virtgpu_ioctl.c
+  dec10064e3e1e8e2d565d5d5c2286896c9cb63e285fa6a6e34643cc689b61f51  virtgpu_kms.c
+  24830830aed95af82d77f8979ec410307e6eb16e117a0bb9400b0b0caf0cea36  virtgpu_object.c
+  75af26930564e7c9dbc38f0adfb86a1c73328045a6110b4e9f0c1262cab550d2  virtgpu_plane.c
+  b1e415c76226e97f86703c38153041179ad2970255ebbcd157d1d9a00e8c8c37  virtgpu_prime.c
+  d3f947bc18f181d1d95f946fee3e4220a471b878991dc06968a48c0c24f2f3eb  virtgpu_submit.c
+  0f3c8851f7e42743315014d3f9ddfea56b4abfc053305d5f46fd935da45e2ca0  virtgpu_trace.h
+  f076a7c647b7f6a2e36315ba5a56cd7f6e1be98179b98eaf623a9ce72c48443a  virtgpu_trace_points.c
+  96e3fdf0991c6baa6b8dc9af12f0b0a4abb564679cc5cb231b0848d8b29a89f3  virtgpu_vq.c
+  96e8acc6d4be057cb023561f04f5da0b9593679e25213312af0ddb43d676c1b2  virtgpu_vram.c
