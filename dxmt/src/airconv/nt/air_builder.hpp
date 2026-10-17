@@ -93,7 +93,7 @@ enum class MemFlags {
   Device = 1,
   Threadgroup = 2,
   Texture = 4,
-  ObjectData = 16, // AnyOS: mem_flags::mem_object_data is 16 (air.wg.barrier), not 4 (= mem_texture)
+  ObjectData = 4,
 };
 
 enum class ThreadScope {

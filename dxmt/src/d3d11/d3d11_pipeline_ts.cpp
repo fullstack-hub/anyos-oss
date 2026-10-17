@@ -37,18 +37,6 @@ public:
         pBlendState(pDesc->BlendState),
         RasterizationEnabled(pDesc->RasterizationEnabled),
         SampleCount(pDesc->SampleCount) {
-    // AnyOS: a geometry shader behind tessellation -- this pipeline only
-    // streams the domain shader's vertices and primitives to buffers (no
-    // rasterization); MTLCompiledGeometryPipelineImpl draws them.
-    bool stream_to_geometry = pDesc->GeometryShader && pDesc->GSPassthrough == ~0u;
-    if (stream_to_geometry)
-      RasterizationEnabled = false;
-    // AnyOS: domain shader stream output -- this pipeline streams the domain
-    // shader's output with a record per workload (no rasterization); the
-    // stream-output kernels write it to the SO buffers in patch order.
-    bool stream_output = !stream_to_geometry && pDesc->SOLayout;
-    if (stream_output)
-      RasterizationEnabled = false;
     if (pDesc->RasterizationEnabled && !pDesc->PixelShader)
       num_rtvs = 0;
     uint32_t unorm_output_reg_mask = 0;
@@ -69,10 +57,10 @@ public:
     auto &domain_reflection = pDesc->DomainShader->reflection();
     uint32_t max_potential_factor = domain_reflection.PostTessellator.MaxPotentialTessFactor;
 
-    // AnyOS: no Apple9-only clamp to 8.  The mesh-size bound computed from
-    // the domain shader's outputs (<= 32 KiB per mesh) already holds on
-    // Apple7/8 (M1/M2), and a factor-8 cap visibly flattened every
-    // displacement-mapped surface asking for more.
+    if (!device_->GetMTLDevice().supportsFamily(WMTGPUFamilyApple9)) {
+      // indeed this value might be too conservative
+      max_potential_factor = std::min(8u, max_potential_factor);
+    }
     if ((float)max_potential_factor < hull_reflection.Tessellator.MaxFactor) {
       WARN("maxtessfactor(", hull_reflection.Tessellator.MaxFactor,
            ") is too large for a mesh pipeline. Clamping to ",
@@ -83,12 +71,12 @@ public:
         pDesc->HullShader->get_shader(ShaderVariantTessellationVertexHull{
             pDesc->InputLayout,
             pDesc->VertexShader, pDesc->IndexBufferFormat,
-            max_potential_factor, stream_to_geometry || stream_output, pDesc->GSPassthrough});
+            max_potential_factor});
     DomainShader =
         pDesc->DomainShader->get_shader(ShaderVariantTessellationDomain{
             pDesc->HullShader, pDesc->GSPassthrough,
-            max_potential_factor, !RasterizationEnabled, stream_to_geometry || stream_output, stream_output});
-    if (pDesc->PixelShader && !stream_to_geometry && !stream_output) {
+            max_potential_factor, !pDesc->RasterizationEnabled});
+    if (pDesc->PixelShader) {
       PixelShader = pDesc->PixelShader->get_shader(ShaderVariantPixel{
           pDesc->SampleMask, pDesc->BlendState->IsDualSourceBlending(),
           depth_stencil_format == WMTPixelFormatInvalid,

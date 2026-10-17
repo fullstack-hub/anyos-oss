@@ -31,11 +31,6 @@ enum SM50_BINDING_INDEX: uint32_t {
   /* For multiple stages in the same shader function */
   SM50_BINDING_INDEX_CONSTANT_BUFFER2 = 6,
   SM50_BINDING_INDEX_ARGUMENT_TABLE2 = 7,
-  SM50_BINDING_INDEX_TESS_STREAM_VERTEX = 8,
-  SM50_BINDING_INDEX_TESS_STREAM_INDEX = 9,
-  SM50_BINDING_INDEX_TESS_STREAM_COUNTER = 10,
-  /* AnyOS: domain shader stream output -- one record per streamed workload */
-  SM50_BINDING_INDEX_TESS_STREAM_RECORD = 11,
 
   SM50_BINDING_INDEX_ROOT_ARGUMENTS = 0,
   SM50_BINDING_INDEX_STATIC_SAMPLERS = 1,
@@ -93,10 +88,6 @@ struct MTL_GEOMETRY_SHADER_REFLECTION {
     uint32_t GSPassThrough;
   };
   uint32_t Primitive;
-  /* AnyOS: the geometry shader writes SV_PrimitiveID (dcl_output_sgv); it
-   * reaches the pixel shader as a per-vertex user attribute
-   * (SM50_SHADER_PSO_PIXEL_SHADER_DATA::gs_primitive_id). */
-  uint32_t WritesPrimitiveID;
 };
 
 struct MTL_POST_TESSELLATOR_REFLECTION {
@@ -211,18 +202,6 @@ enum SM50_SHADER_COMPILATION_ARGUMENT_TYPE {
   SM50_SHADER_PSO_GEOMETRY_SHADER = 6,
   SM50_SHADER_PSO_TESSELLATOR = 7,
   SM50_SHADER_ROOT_SIGNATURE = 8,
-  /* AnyOS: tessellation followed by a geometry shader.  The domain shader
-   * streams its vertices and primitives to buffers (SM50_BINDING_INDEX_TESS_
-   * STREAM_*) instead of rasterizing; the geometry pipeline's object stage
-   * reads them back (SM50CompileGeometryPipelineVertex with the domain
-   * shader as its vertex shader). */
-  SM50_SHADER_TESSELLATION_STREAM = 9,
-  /* AnyOS: domain shader stream output.  With SM50_SHADER_TESSELLATION_STREAM,
-   * every streamed workload also writes a record (patch, first primitive
-   * within the patch, first index, primitive count) to
-   * SM50_BINDING_INDEX_TESS_STREAM_RECORD, from which the stream-output
-   * kernels write the primitives in patch order. */
-  SM50_SHADER_TESSELLATION_STREAM_OUTPUT = 10,
   SM50_SHADER_ARGUMENT_TYPE_MAX = 0xffffffff,
 };
 
@@ -278,12 +257,6 @@ struct SM50_SHADER_PSO_PIXEL_SHADER_DATA {
    * bit-reinterprets, and Metal rejects the pipeline otherwise). */
   uint32_t uint_output_reg_mask;
   uint32_t sint_output_reg_mask;
-  /* AnyOS: a geometry shader wrote SV_PrimitiveID.  Metal's
-   * [[primitive_id]] in a fragment function behind a mesh function is the
-   * primitive's index in its threadgroup, so the pixel shader reads the
-   * value the geometry shader stored in the "SV_PrimitiveID" vertex
-   * attribute instead. */
-  bool gs_primitive_id;
 };
 
 struct SM50_IA_INPUT_ELEMENT {
@@ -331,16 +304,6 @@ struct SM50_SHADER_PSO_TESSELLATOR_DATA {
   void *next;
   enum SM50_SHADER_COMPILATION_ARGUMENT_TYPE type;
   uint32_t max_potential_tess_factor;
-};
-
-struct SM50_SHADER_TESSELLATION_STREAM_DATA {
-  void *next;
-  enum SM50_SHADER_COMPILATION_ARGUMENT_TYPE type;
-};
-
-struct SM50_SHADER_TESSELLATION_STREAM_OUTPUT_DATA {
-  void *next;
-  enum SM50_SHADER_COMPILATION_ARGUMENT_TYPE type;
 };
 
 struct SM50_SHADER_ROOT_SIGNATURE_DATA {
