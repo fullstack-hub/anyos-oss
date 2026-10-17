@@ -1,0 +1,27 @@
+diff --git a/libs/vkd3d/device_workarounds.c b/libs/vkd3d/device_workarounds.c
+--- a/libs/vkd3d/device_workarounds.c
++++ b/libs/vkd3d/device_workarounds.c
+@@ -983,6 +983,13 @@
+ void vkd3d_physical_device_info_apply_workarounds(struct vkd3d_physical_device_info *info,
+         struct d3d12_device *device)
+ {
++    char anyos_mesh[8];
++    /* Explicit development opt-in: retain the Vulkan capability checks below.
++     * This only opts out of the unrelated UE5 barycentrics workaround, and
++     * does not advertise barycentrics or raise the mesh limits. */
++    bool anyos_mesh_enabled = vkd3d_get_env_var("ANYOS_D3D12_MESH_SHADER", anyos_mesh, sizeof(anyos_mesh)) &&
++            strcmp(anyos_mesh, "1") == 0;
++
+     /* A performance workaround for NV.
+      * The 16 byte offset is a lie, as that is only actually required when we
+      * use vectorized load-stores. When we emit vectorized load-store ops,
+@@ -999,7 +1006,8 @@
+      * Unfortunately, we don't know of a robust way to detect UE5, so have to apply this globally.
+      * Similarly, Intel Arc does not expose barycentrics, but does expose mesh shaders ...
+      * Unclear if that will ever be resolved. */
+-    if (!(vkd3d_application_feature_override & VKD3D_APPLICATION_FEATURE_MESH_SHADER_WITHOUT_BARYCENTRICS) &&
++    if (!anyos_mesh_enabled &&
++            !(vkd3d_application_feature_override & VKD3D_APPLICATION_FEATURE_MESH_SHADER_WITHOUT_BARYCENTRICS) &&
+             !device->vk_info.KHR_fragment_shader_barycentric && device->vk_info.EXT_mesh_shader)
+     {
+         WARN("Mesh shaders are supported, but not barycentrics. Disabling mesh shaders as a global UE5 workaround.\n");

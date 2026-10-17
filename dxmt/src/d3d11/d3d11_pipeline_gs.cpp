@@ -49,19 +49,29 @@ public:
       sint_output_reg_mask |=
           (uint32_t(IsSintColorFormat(pDesc->ColorAttachmentFormats[i])) << i);
     }
+    if (pDesc->DomainShader) {
+      // AnyOS: behind tessellation the object stage reads back what the
+      // domain shader streamed (an indexed list, 32-bit indices).
+      VertexShader = pDesc->DomainShader->get_shader(ShaderVariantGeometryVertex{
+          {}, pDesc->GeometryShader, SM50_INDEX_BUFFER_FORMAT_UINT32, false, true});
+      GeometryShader = pDesc->GeometryShader->get_shader(
+        ShaderVariantGeometry{pDesc->DomainShader, false});
+    } else {
     VertexShader =
         pDesc->VertexShader->get_shader(ShaderVariantGeometryVertex{
             pDesc->InputLayout, pDesc->GeometryShader,
             pDesc->IndexBufferFormat, pDesc->GSStripTopology});
     GeometryShader = pDesc->GeometryShader->get_shader(
       ShaderVariantGeometry{pDesc->VertexShader, pDesc->GSStripTopology});
+    }
    
     if (pDesc->PixelShader) {
       PixelShader = pDesc->PixelShader->get_shader(ShaderVariantPixel{
           pDesc->SampleMask, pDesc->BlendState->IsDualSourceBlending(),
           depth_stencil_format == WMTPixelFormatInvalid,
           unorm_output_reg_mask, uint_output_reg_mask,
-          sint_output_reg_mask});
+          sint_output_reg_mask,
+          bool(pDesc->GeometryShader->reflection().GeometryShader.WritesPrimitiveID)});
       ps_valid_render_targets = pDesc->PixelShader->reflection().PSValidRenderTargets;
       ps_uint_output_registers = pDesc->PixelShader->reflection().PSUintOutputRegisterMask;
       ps_sint_output_registers = pDesc->PixelShader->reflection().PSSintOutputRegisterMask;
