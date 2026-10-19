@@ -106,16 +106,13 @@ struct ShaderVariantPixel {
   uint32_t unorm_output_reg_mask;
   uint32_t uint_output_reg_mask;
   uint32_t sint_output_reg_mask;
-  /* AnyOS: the geometry shader in front wrote SV_PrimitiveID */
-  bool gs_primitive_id = false;
   bool operator==(const this_type &rhs) const {
     return sample_mask == rhs.sample_mask &&
            dual_source_blending == rhs.dual_source_blending &&
            disable_depth_output == rhs.disable_depth_output &&
            unorm_output_reg_mask == rhs.unorm_output_reg_mask &&
            uint_output_reg_mask == rhs.uint_output_reg_mask &&
-           sint_output_reg_mask == rhs.sint_output_reg_mask &&
-           gs_primitive_id == rhs.gs_primitive_id;
+           sint_output_reg_mask == rhs.sint_output_reg_mask;
   }
 };
 
@@ -125,14 +122,11 @@ struct ShaderVariantTessellationVertexHull {
   ManagedShader vertex_shader_handle;
   SM50_INDEX_BUFFER_FORMAT index_buffer_format;
   uint32_t max_potential_tess_factor;
-  bool stream = false; // AnyOS: the domain stage streams (no mesh workload groups)
-  uint32_t gs_passthrough = ~0u; // AnyOS: the pass-through geometry shader's primitive attributes (no groups)
   bool operator==(const this_type &rhs) const {
     return input_layout_handle == rhs.input_layout_handle &&
            vertex_shader_handle == rhs.vertex_shader_handle &&
            index_buffer_format == rhs.index_buffer_format &&
-           max_potential_tess_factor == rhs.max_potential_tess_factor &&
-           stream == rhs.stream && gs_passthrough == rhs.gs_passthrough;
+           max_potential_tess_factor == rhs.max_potential_tess_factor;
   }
 };
 
@@ -142,15 +136,11 @@ struct ShaderVariantTessellationDomain {
   uint32_t gs_passthrough;
   uint32_t max_potential_tess_factor;
   bool rasterization_disabled;
-  bool stream_to_geometry = false; // AnyOS: feeds a geometry shader (SM50_SHADER_TESSELLATION_STREAM)
-  bool stream_output = false; // AnyOS: streamed for stream output (SM50_SHADER_TESSELLATION_STREAM_OUTPUT)
   bool operator==(const this_type &rhs) const {
     return hull_shader_handle == rhs.hull_shader_handle &&
            gs_passthrough == rhs.gs_passthrough &&
            max_potential_tess_factor == rhs.max_potential_tess_factor &&
-           rasterization_disabled == rhs.rasterization_disabled &&
-           stream_to_geometry == rhs.stream_to_geometry &&
-           stream_output == rhs.stream_output;
+           rasterization_disabled == rhs.rasterization_disabled;
   }
 };
 
@@ -160,13 +150,11 @@ struct ShaderVariantGeometryVertex {
   ManagedShader geometry_shader_handle;
   SM50_INDEX_BUFFER_FORMAT index_buffer_format;
   bool strip_topology;
-  bool tessellation_stream = false; // AnyOS: the shader is a domain shader streamed by the tessellation pass
   bool operator==(const this_type &rhs) const {
     return input_layout_handle == rhs.input_layout_handle &&
            geometry_shader_handle == rhs.geometry_shader_handle &&
            index_buffer_format == rhs.index_buffer_format &&
-           strip_topology == rhs.strip_topology &&
-           tessellation_stream == rhs.tessellation_stream;
+           strip_topology == rhs.strip_topology;
   }
 };
 
