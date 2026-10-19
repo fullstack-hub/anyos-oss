@@ -155,8 +155,7 @@ ArgumentEncodingContext::encodeStreamOutputBuffers<PipelineKind::Ordinary>(uint6
 template <>
 void
 ArgumentEncodingContext::encodeStreamOutputBuffers<PipelineKind::Tessellation>(uint64_t offset) {
-  // AnyOS: domain shader stream output is written after the draw by the
-  // so_scan/so_write kernels from streamOutputBinding(); nothing to encode.
+  ERR("unimplemented stream output from tessellation pipeline");
 }
 template <>
 void
@@ -256,10 +255,8 @@ ArgumentEncodingContext::encodeConstantBuffers(const MTL_SHADER_REFLECTION *refl
       cmd.type = WMTRenderCommandSetObjectBufferOffset;
     } else if constexpr (stage == PipelineStage::Domain) {
       cmd.type = WMTRenderCommandSetMeshBufferOffset;
-      tess_gs_mesh_offset[0][0] = cmd.offset;
     } else if constexpr (stage == PipelineStage::Geometry) {
       cmd.type = WMTRenderCommandSetMeshBufferOffset;
-      tess_gs_mesh_offset[1][0] = cmd.offset;
     } else {
       assert(0 && "Not implemented or unreachable");
     }
@@ -446,10 +443,8 @@ ArgumentEncodingContext::encodeShaderResources(
       cmd.type = WMTRenderCommandSetObjectBufferOffset;
     } else if constexpr (stage == PipelineStage::Domain) {
       cmd.type = WMTRenderCommandSetMeshBufferOffset;
-      tess_gs_mesh_offset[0][1] = cmd.offset;
     } else if constexpr (stage == PipelineStage::Geometry) {
       cmd.type = WMTRenderCommandSetMeshBufferOffset;
-      tess_gs_mesh_offset[1][1] = cmd.offset;
     } else {
       assert(0 && "Not implemented or unreachable");
     }
