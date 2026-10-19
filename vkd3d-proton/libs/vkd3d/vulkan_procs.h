@@ -295,6 +295,10 @@ VK_DEVICE_EXT_PFN(vkCmdSetRasterizationSamplesEXT)
 /* VK_EXT_external_memory_host */
 VK_DEVICE_EXT_PFN(vkGetMemoryHostPointerPropertiesEXT)
 
+/* VK_EXT_sample_locations */
+VK_INSTANCE_EXT_PFN(vkGetPhysicalDeviceMultisamplePropertiesEXT)
+VK_DEVICE_EXT_PFN(vkCmdSetSampleLocationsEXT)
+
 /* VK_EXT_mesh_shader */
 VK_DEVICE_EXT_PFN(vkCmdDrawMeshTasksEXT)
 VK_DEVICE_EXT_PFN(vkCmdDrawMeshTasksIndirectEXT)
