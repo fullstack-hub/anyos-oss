@@ -1,0 +1,56 @@
+From: FULLSTACKHUB
+Subject: [PATCH] vkd3d-proton: refuse SO statistics query heaps without stream output
+
+AnyOS's host reports no transform feedback queries (gfxstream cannot
+snapshot xfb query pools), so vkd3d-proton turns EXT_transform_feedback off
+and stream output is unsupported (the D3D12 UMD also refuses stream-output
+PSOs, 0031).  An SO_STATISTICS query heap was still created (it is an
+inline heap), its per-list Vulkan query pool failed, and BeginQuery called
+vkCmdBeginQueryIndexedEXT, a NULL pointer: D3D11On12 creating a D3D11
+SO_STATISTICS query crashed the process (d3d11-tess-probe ds-stream-output
+over 11on12).  The heap is refused with E_NOTIMPL now, and the indexed
+begin/end calls are skipped when the extension is off.
+
+--- a/libs/vkd3d/command.c
++++ b/libs/vkd3d/command.c
+@@ -5171,7 +5171,9 @@
+     if (d3d12_query_type_is_indexed(query->type))
+     {
+         unsigned int stream = query->type - D3D12_QUERY_TYPE_SO_STATISTICS_STREAM0;
+-        VK_CALL(vkCmdBeginQueryIndexedEXT(list->cmd.vk_command_buffer, query->vk_pool, query->vk_index, flags, stream));
++        /* AnyOS: never call the NULL entry point of a disabled extension. */
++        if (list->device->vk_info.EXT_transform_feedback)
++            VK_CALL(vkCmdBeginQueryIndexedEXT(list->cmd.vk_command_buffer, query->vk_pool, query->vk_index, flags, stream));
+     }
+     else
+         VK_CALL(vkCmdBeginQuery(list->cmd.vk_command_buffer, query->vk_pool, query->vk_index, flags));
+@@ -5188,7 +5190,8 @@
+     if (d3d12_query_type_is_indexed(query->type))
+     {
+         unsigned int stream = query->type - D3D12_QUERY_TYPE_SO_STATISTICS_STREAM0;
+-        VK_CALL(vkCmdEndQueryIndexedEXT(list->cmd.vk_command_buffer, query->vk_pool, query->vk_index, stream));
++        if (list->device->vk_info.EXT_transform_feedback)
++            VK_CALL(vkCmdEndQueryIndexedEXT(list->cmd.vk_command_buffer, query->vk_pool, query->vk_index, stream));
+     }
+     else
+         VK_CALL(vkCmdEndQuery(list->cmd.vk_command_buffer, query->vk_pool, query->vk_index));
+--- a/libs/vkd3d/resource.c
++++ b/libs/vkd3d/resource.c
+@@ -10769,6 +10769,17 @@
+     VkResult vr;
+     HRESULT hr;
+ 
++    /* AnyOS: without transform feedback queries stream output is disabled
++     * (EXT_transform_feedback is turned off at device creation), and an
++     * SO_STATISTICS heap would reach vkCmdBeginQueryIndexedEXT, a NULL
++     * pointer then (D3D11On12 creating SO statistics queries crashed).
++     * Refuse the heap instead. */
++    if (desc->Type == D3D12_QUERY_HEAP_TYPE_SO_STATISTICS && !device->vk_info.EXT_transform_feedback)
++    {
++        WARN("Stream output is not supported, refusing an SO statistics query heap.\n");
++        return E_NOTIMPL;
++    }
++
+     if (!(object = vkd3d_calloc(1, sizeof(*object))))
+         return E_OUTOFMEMORY;
+ 
