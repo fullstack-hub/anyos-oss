@@ -1,0 +1,24 @@
+d3d11: draw point-mode tessellation
+
+Applies on top of 0008.
+
+FinalizeTessellationRenderPipeline refused hull shaders with point output
+(UnsupportedTessellationOutputPrimitive) although the converter already
+emits the point mesh path (generatePrimitivePoint, point rasterization).
+With the refusal gone the probe's point-mode case matches WARP pixel for
+pixel.  Line output (isolines) stays refused: there is no line generator.
+
+--- a/src/d3d11/d3d11_context_impl.cpp
++++ b/src/d3d11/d3d11_context_impl.cpp
+@@ -5050,11 +5050,6 @@
+         enc.setCompatibilityFlag(FeatureCompatibility::UnsupportedTessellationOutputPrimitive);
+       });
+       return DrawCallStatus::Invalid;
+-    case MTL_TESSELLATOR_OUTPUT_POINT:
+-      EmitST([](ArgumentEncodingContext &enc) {
+-        enc.setCompatibilityFlag(FeatureCompatibility::UnsupportedTessellationOutputPrimitive);
+-      });
+-      return DrawCallStatus::Invalid;
+     default:
+       break;
+     }

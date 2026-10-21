@@ -1,0 +1,55 @@
+d3d11: drain the command queue before the device's state is torn down
+
+Applies on top of 0006 (dxmt bcdcf6da + the staging UpdateSubresource path).
+
+MTLD3D11DXGIDevice destroys its d3d11_device_ member (the pipeline cache,
+the state object caches, the resources recorded chunks reference) before
+`device`, whose CommandQueue keeps its encode and finish threads running
+until its own destructor joins them.  A chunk still being encoded then
+walks freed state: DWM re-created its D3D11 device right after uploading a
+desktop-sized texture (7680x4074, 125 MB, three monitors) and the render
+worker died in the encode thread inside a chunk lambda (pointer
+authentication failure on a freed capture, 2026-09-21).  The DXGI device's
+destructor now commits what the immediate context recorded and waits for
+every committed chunk to finish before any member is destroyed.
+
+diff --git a/src/d3d11/d3d11_device.cpp b/src/d3d11/d3d11_device.cpp
+index 6ad778e..46609c7 100644
+--- a/src/d3d11/d3d11_device.cpp
++++ b/src/d3d11/d3d11_device.cpp
+@@ -1133,6 +1133,17 @@ private:
+   std::unique_ptr<MTLD3D11CommandListPoolBase> commandlist_pool_;
+   std::unique_ptr<MTLD3D11PipelineCacheBase> pipeline_cache_;
+ 
++public:
++  /**
++   * AnyOS: commit whatever the immediate context has recorded, for the
++   * owner to wait on before this device's state is torn down.
++   */
++  void FlushImmediateContextForShutdown() {
++    if (context_)
++      context_->Flush();
++  }
++
++private:
+   Device& device_;
+   /** ensure destructor called first */
+   std::unique_ptr<MTLD3D11DeviceContextBase> context_;
+@@ -1167,6 +1178,17 @@ public:
+   }
+ 
+   ~MTLD3D11DXGIDevice() {
++    // AnyOS: d3d11_device_ (the pipeline cache, the state object caches,
++    // the resources the recorded chunks reference) is destroyed before
++    // `device`, whose command queue keeps encoding and finishing chunks
++    // on its own threads until its own destructor joins them -- a chunk
++    // still being encoded then walked freed state (the encode thread died
++    // in a chunk lambda while DWM re-created its device right after a
++    // 125 MB desktop-sized upload, 2026-09-21).  Commit what is recorded
++    // and wait for every committed chunk to finish first.
++    d3d11_device_.FlushImmediateContextForShutdown();
++    if (auto committed = cmd_queue_.CurrentSeqId(); committed > 0)
++      cmd_queue_.WaitCPUFence(committed - 1);
+     if (local_kmt_) {
+       D3DKMT_DESTROYDEVICE destroy = {};
+       destroy.hDevice = local_kmt_;

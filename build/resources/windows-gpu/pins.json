@@ -1,0 +1,31 @@
+{
+  "vkd3dProton": {
+    "origin": "https://github.com/HansKristian-Work/vkd3d-proton.git",
+    "revision": "2a38e7991f851e85151c104504d5e343530d1523",
+    "patches": [
+      "patches/0009-vkd3d-proton-anyos-host-features.patch",
+      "patches/0022-vkd3d-proton-dxil-pass-through-hull-entry.patch",
+      "patches/0023-dxil-spirv-dxbc-udiv-two-outputs-type.patch",
+      "patches/0025-vkd3d-proton-transform-feedback-fixme-once.patch",
+      "patches/0027-dxil-spirv-tess-factor-rows-relative-to-first-element.patch",
+      "patches/0028-vkd3d-proton-cache-key-anyos-shader-revision.patch",
+      "patches/0036-vkd3d-proton-refuse-so-statistics-without-stream-output.patch",
+      "patches/0043-vkd3d-moltenvk-cbv-and-submit-policy.patch",
+      "patches/0047-vkd3d-invalidate-root-descriptors-on-signature-change.patch",
+      "../gfxstream/0162-vkd3d-mesh-development-opt-in.patch",
+      "patches/0166-vkd3d-proton-moltenvk-shader-model-without-denorm-modes.patch",
+      "patches/0200-dxil-spirv-sampler-feedback-two-32bit-planes.patch",
+      "patches/0201-vkd3d-sampler-feedback-two-32bit-planes.patch",
+      "patches/0242-vkd3d-proton-programmable-sample-positions.patch",
+      "patches/0261-vkd3d-integration2-shader-cache-revision.patch",
+      "patches/0185-vkd3d-proton-shader-model-from-real-float-controls.patch",
+      "patches/sw31-vkd3d-reduced-profile.patch"
+    ]
+  },
+  "llvmMingw": {
+    "release": "20260908",
+    "url": "https://github.com/mstorsjo/llvm-mingw/releases/download/20260908/llvm-mingw-20260908-ucrt-macos-universal.tar.xz",
+    "sha256": "d1dc5d1ecf3a3ced5ed5544c72f1acd0c8e84eb3024d520ecc6b143eec62a149",
+    "directory": "llvm-mingw-20260908-ucrt-macos-universal"
+  }
+}
