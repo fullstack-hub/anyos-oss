@@ -481,6 +481,10 @@ public:
       llvm::Value *TessFactorIn, llvm::Value *TessFactorOut0, llvm::Value *TessFactorOut1, llvm::Value *TessFactorOut2
   );
 
+  void HullGenerateWorkloadForIsoline(
+      llvm::Value *PatchIndex, llvm::Value *CountPtr, llvm::Value *DataPtr, TessellatorPartitioning Partitioning,
+      llvm::Value *TessFactorDetail, llvm::Value *TessFactorDensity
+  );
   void HullGenerateWorkloadForQuad(
       llvm::Value *PatchIndex, llvm::Value *CountPtr, llvm::Value *DataPtr, TessellatorPartitioning Partitioning,
       llvm::Value *TessFactorIn0, llvm::Value *TessFactorIn1, llvm::Value *TessFactorOut0, llvm::Value *TessFactorOut1,
@@ -488,6 +492,25 @@ public:
   );
 
   llvm::Value *DomainGetPatchIndex(llvm::Value *WorkloadIndex, llvm::Value *DataPtr);
+  // AnyOS: mesh workload groups (dxmt.pack_workload_groups / locate_group_vertex / generate_group_primitives)
+  llvm::Value *HullPackWorkloadGroups(
+      llvm::Value *DataPtr, llvm::Value *Count, llvm::Value *MaxVertices, llvm::Value *MaxPrimitives,
+      llvm::Value *GroupStartPtr
+  );
+  llvm::Value *DomainLocateGroupVertex(llvm::Value *First, llvm::Value *Last, llvm::Value *Vertex, llvm::Value *DataPtr);
+  void DomainGenerateGroupPrimitives(llvm::Value *Encoded, llvm::Value *DataPtr, TessellatorOutputPrimitive Primitive);
+
+  // AnyOS: tessellation followed by a geometry shader (air_tessellation.metal).
+  llvm::Value *DomainStreamReserve(llvm::Value *WorkloadIndex, llvm::Value *DataPtr, llvm::Value *Counters);
+  void DomainStreamPrimitives(
+      llvm::Value *WorkloadIndex, llvm::Value *DataPtr, llvm::Value *Indices, llvm::Value *Counters,
+      llvm::Value *VertexBase, TessellatorOutputPrimitive Primitive
+  );
+  // AnyOS: domain shader stream output (dxmt.domain_so_stream_primitives.*)
+  void DomainSOStreamPrimitives(
+      llvm::Value *WorkloadIndex, llvm::Value *DataPtr, llvm::Value *Indices, llvm::Value *Counters,
+      llvm::Value *VertexBase, llvm::Value *Records, llvm::Value *PatchId, TessellatorOutputPrimitive Primitive
+  );
 
   std::tuple<llvm::Value *, llvm::Value *, llvm::Value *> DomainGetLocation(
       llvm::Value *WorkloadIndex, llvm::Value *ThreadIndex, llvm::Value *DataPtr, TessellatorPartitioning Partitioning

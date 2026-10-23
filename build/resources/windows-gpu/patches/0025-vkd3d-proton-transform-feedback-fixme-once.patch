@@ -1,0 +1,23 @@
+vkd3d-proton: report the missing transform feedback once, not per command list
+
+On a Vulkan device without transform feedback (MoltenVK), SOSetTargets
+printed a FIXME on every call, and the D3D12 runtime clears the stream-output
+targets on every command list reset -- one message a frame.  Written to a
+console stderr that cost ~7 ms a frame: a tessellated D3D12 scene through the
+AnyOS D3D12 UMD ran at 43 fps from a console and 95 fps with stderr
+discarded.  The message is now FIXME_ONCE.
+
+--- a/libs/vkd3d/command.c
++++ b/libs/vkd3d/command.c
+@@ -15252,7 +15252,10 @@
+ 
+     if (!list->device->vk_info.EXT_transform_feedback)
+     {
+-        FIXME("Transform feedback is not supported by Vulkan implementation.\n");
++        /* Once: the D3D12 runtime clears the SO targets on every command
++         * list reset, and a per-frame message cost ~7 ms a frame whenever
++         * stderr is a console. */
++        FIXME_ONCE("Transform feedback is not supported by Vulkan implementation.\n");
+         return;
+     }
+ 
