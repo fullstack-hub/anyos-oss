@@ -1,0 +1,254 @@
+{
+  "provenance": "Exact installed Homebrew .brew formula snapshots; libraries verified from the final stage_samba otool dependency closure. Formulae retain build/install edits and options.",
+  "components": [
+    {
+      "name": "gettext",
+      "version": "1.0",
+      "libraries": [
+        "libintl.8.dylib"
+      ],
+      "url": "https://ftpmirror.gnu.org/gnu/gettext/gettext-1.0.tar.gz",
+      "sha256": "85d99b79c981a404874c02e0342176cf75c7698e2b51fe41031cf6526d974f1a",
+      "filename": "gettext-1.0.tar.gz",
+      "sourceVersion": "1.0",
+      "formula": "foreign-formulas/gettext.rb",
+      "patches": [],
+      "mirrors": [
+        "https://ftp.gnu.org/gnu/gettext/gettext-1.0.tar.gz"
+      ]
+    },
+    {
+      "name": "gmp",
+      "version": "6.3.0",
+      "libraries": [
+        "libgmp.10.dylib"
+      ],
+      "url": "https://ftp.gnu.org/gnu/gmp/gmp-6.3.0.tar.xz",
+      "sha256": "a3c2b80201b89e68616f4ad30bc66aee4927c3ce50e33929ca819d5c43538898",
+      "filename": "gmp-6.3.0.tar.xz",
+      "sourceVersion": "6.3.0",
+      "formula": "foreign-formulas/gmp.rb",
+      "patches": [],
+      "mirrors": [
+        "https://gmplib.org/download/gmp/gmp-6.3.0.tar.xz"
+      ]
+    },
+    {
+      "name": "gnutls",
+      "version": "3.8.13_2",
+      "libraries": [
+        "libgnutls.30.dylib"
+      ],
+      "url": "https://www.gnupg.org/ftp/gcrypt/gnutls/v3.8/gnutls-3.8.13.tar.xz",
+      "sha256": "ffed8ec1bf09c2426d4f14aae377de4753b53e537d685e604e99a8b16ca9c97e",
+      "filename": "gnutls-3.8.13.tar.xz",
+      "sourceVersion": "3.8.13",
+      "formula": "foreign-formulas/gnutls.rb",
+      "patches": [
+        {
+          "url": "https://gitlab.com/gnutls/gnutls/-/commit/29c2027c963cf559817d0da37c1fc2efd0c1bd6a.diff",
+          "sha256": "c0bfc0164ff131c9d2e1c4d0367430f8b767b64c9c21e0f408bd634d21fb0302",
+          "filename": "gnutls-29c2027c963cf559817d0da37c1fc2efd0c1bd6a.diff"
+        }
+      ],
+      "mirrors": [
+        "https://www.mirrorservice.org/sites/ftp.gnupg.org/gcrypt/gnutls/v3.8/gnutls-3.8.13.tar.xz"
+      ]
+    },
+    {
+      "name": "krb5",
+      "version": "1.22.2",
+      "libraries": [
+        "libgssapi_krb5.2.2.dylib",
+        "libkrb5.3.3.dylib",
+        "libk5crypto.3.1.dylib",
+        "libcom_err.3.0.dylib",
+        "libkrb5support.1.1.dylib"
+      ],
+      "url": "https://kerberos.org/dist/krb5/1.22/krb5-1.22.2.tar.gz",
+      "sha256": "3243ffbc8ea4d4ac22ddc7dd2a1dc54c57874c40648b60ff97009763554eaf13",
+      "filename": "krb5-1.22.2.tar.gz",
+      "sourceVersion": "1.22.2",
+      "formula": "foreign-formulas/krb5.rb",
+      "patches": [],
+      "mirrors": []
+    },
+    {
+      "name": "libidn2",
+      "version": "2.3.8",
+      "libraries": [
+        "libidn2.0.dylib"
+      ],
+      "url": "https://ftp.gnu.org/gnu/libidn/libidn2-2.3.8.tar.gz",
+      "sha256": "f557911bf6171621e1f72ff35f5b1825bb35b52ed45325dcdee931e5d3c0787a",
+      "filename": "libidn2-2.3.8.tar.gz",
+      "sourceVersion": "2.3.8",
+      "formula": "foreign-formulas/libidn2.rb",
+      "patches": [],
+      "mirrors": [
+        "https://ftpmirror.gnu.org/libidn/libidn2-2.3.8.tar.gz"
+      ]
+    },
+    {
+      "name": "libtasn1",
+      "version": "4.21.0",
+      "libraries": [
+        "libtasn1.6.dylib"
+      ],
+      "url": "https://ftpmirror.gnu.org/gnu/libtasn1/libtasn1-4.21.0.tar.gz",
+      "sha256": "1d8a444a223cc5464240777346e125de51d8e6abf0b8bac742ac84609167dc87",
+      "filename": "libtasn1-4.21.0.tar.gz",
+      "sourceVersion": "4.21.0",
+      "formula": "foreign-formulas/libtasn1.rb",
+      "patches": [],
+      "mirrors": [
+        "https://ftp.gnu.org/gnu/libtasn1/libtasn1-4.21.0.tar.gz"
+      ]
+    },
+    {
+      "name": "libunistring",
+      "version": "1.4.2",
+      "libraries": [
+        "libunistring.5.dylib"
+      ],
+      "url": "https://ftpmirror.gnu.org/gnu/libunistring/libunistring-1.4.2.tar.gz",
+      "sha256": "e82664b170064e62331962126b259d452d53b227bb4a93ab20040d846fec01d8",
+      "filename": "libunistring-1.4.2.tar.gz",
+      "sourceVersion": "1.4.2",
+      "formula": "foreign-formulas/libunistring.rb",
+      "patches": [],
+      "mirrors": [
+        "https://ftp.gnu.org/gnu/libunistring/libunistring-1.4.2.tar.gz"
+      ]
+    },
+    {
+      "name": "libxcrypt",
+      "version": "4.5.2",
+      "libraries": [
+        "libcrypt.2.dylib"
+      ],
+      "url": "https://github.com/besser82/libxcrypt/releases/download/v4.5.2/libxcrypt-4.5.2.tar.xz",
+      "sha256": "71513a31c01a428bccd5367a32fd95f115d6dac50fb5b60c779d5c7942aec071",
+      "filename": "libxcrypt-4.5.2.tar.xz",
+      "sourceVersion": "4.5.2",
+      "formula": "foreign-formulas/libxcrypt.rb",
+      "patches": [],
+      "mirrors": []
+    },
+    {
+      "name": "lmdb",
+      "version": "1.0.2",
+      "libraries": [
+        "liblmdb.dylib.1.0"
+      ],
+      "url": "https://git.openldap.org/openldap/openldap/-/archive/LMDB_1.0.2/openldap-LMDB_1.0.2.tar.bz2",
+      "sha256": "f35a2eb3a8e51650397604bbb49a1295221cd4739ff787d324f6c442c138a3ee",
+      "filename": "openldap-LMDB_1.0.2.tar.bz2",
+      "sourceVersion": "1.0.2",
+      "formula": "foreign-formulas/lmdb.rb",
+      "patches": [],
+      "mirrors": []
+    },
+    {
+      "name": "nettle",
+      "version": "4.0",
+      "libraries": [
+        "libhogweed.7.0.dylib",
+        "libnettle.9.0.dylib"
+      ],
+      "url": "https://ftpmirror.gnu.org/gnu/nettle/nettle-4.0.tar.gz",
+      "sha256": "3addbc00da01846b232fb3bc453538ea5468da43033f21bb345cb1e9073f5094",
+      "filename": "nettle-4.0.tar.gz",
+      "sourceVersion": "4.0",
+      "formula": "foreign-formulas/nettle.rb",
+      "patches": [],
+      "mirrors": [
+        "https://ftp.gnu.org/gnu/nettle/nettle-4.0.tar.gz"
+      ]
+    },
+    {
+      "name": "openssl@4",
+      "version": "4.0.3",
+      "libraries": [
+        "libcrypto.4.dylib"
+      ],
+      "url": "https://github.com/openssl/openssl/releases/download/openssl-4.0.3/openssl-4.0.3.tar.gz",
+      "sha256": "325b5c806167c13b40b1ffeadfe0248197c00eccc4cf123ec1e28d2d2fd216d9",
+      "filename": "openssl-4.0.3.tar.gz",
+      "sourceVersion": "4.0.3",
+      "formula": "foreign-formulas/openssl@4.rb",
+      "patches": [],
+      "mirrors": []
+    },
+    {
+      "name": "p11-kit",
+      "version": "0.26.5",
+      "libraries": [
+        "libp11-kit.0.dylib"
+      ],
+      "url": "https://github.com/p11-glue/p11-kit/releases/download/0.26.5/p11-kit-0.26.5.tar.xz",
+      "sha256": "f2cc09111e44bf3fea58f023180b33acea90aa82d042d6fbb623fbc5ba033bb7",
+      "filename": "p11-kit-0.26.5.tar.xz",
+      "sourceVersion": "0.26.5",
+      "formula": "foreign-formulas/p11-kit.rb",
+      "patches": [],
+      "mirrors": []
+    },
+    {
+      "name": "popt",
+      "version": "1.19",
+      "libraries": [
+        "libpopt.0.dylib"
+      ],
+      "url": "https://ftp.osuosl.org/pub/rpm/popt/releases/popt-1.x/popt-1.19.tar.gz",
+      "sha256": "c25a4838fc8e4c1c8aacb8bd620edb3084a3d63bf8987fdad3ca2758c63240f9",
+      "filename": "popt-1.19.tar.gz",
+      "sourceVersion": "1.19",
+      "formula": "foreign-formulas/popt.rb",
+      "patches": [],
+      "mirrors": []
+    },
+    {
+      "name": "talloc",
+      "version": "2.5.0",
+      "libraries": [
+        "libtalloc.2.5.0.dylib"
+      ],
+      "url": "https://www.samba.org/ftp/talloc/talloc-2.5.0.tar.gz",
+      "sha256": "912afa237510ae542a7733998eb18a12bcda35ab6729c8e2ddb43e8d0ebab007",
+      "filename": "talloc-2.5.0.tar.gz",
+      "sourceVersion": "2.5.0",
+      "formula": "foreign-formulas/talloc.rb",
+      "patches": [],
+      "mirrors": []
+    },
+    {
+      "name": "tdb",
+      "version": "1.4.15",
+      "libraries": [
+        "libtdb.1.4.15.dylib"
+      ],
+      "url": "https://www.samba.org/ftp/tdb/tdb-1.4.15.tar.gz",
+      "sha256": "fba09d8df1f1b9072aeae8e78b2bd43c5afef20b2f6deefa633aa14a377a8dd2",
+      "filename": "tdb-1.4.15.tar.gz",
+      "sourceVersion": "1.4.15",
+      "formula": "foreign-formulas/tdb.rb",
+      "patches": [],
+      "mirrors": []
+    },
+    {
+      "name": "tevent",
+      "version": "0.17.2",
+      "libraries": [
+        "libtevent.0.17.2.dylib"
+      ],
+      "url": "https://www.samba.org/ftp/tevent/tevent-0.17.2.tar.gz",
+      "sha256": "e53b1ac288d017d66dde0471cd429a806168ecf07179d7f019572d7a7e05f0d6",
+      "filename": "tevent-0.17.2.tar.gz",
+      "sourceVersion": "0.17.2",
+      "formula": "foreign-formulas/tevent.rb",
+      "patches": [],
+      "mirrors": []
+    }
+  ]
+}

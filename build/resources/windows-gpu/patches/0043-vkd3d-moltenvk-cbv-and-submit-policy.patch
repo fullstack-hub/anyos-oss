@@ -1,0 +1,50 @@
+vkd3d-proton: overlap MoltenVK encoding and use uniform root CBVs
+
+MoltenVK maps the shared Vulkan queue to an ordered Metal queue. Do not
+CPU-wait after each same-priority mixed graphics/compute command buffer:
+that prevents CPU encoding from overlapping GPU work. Preserve high-priority
+staggering, CPU resolution of cross-queue fence waits, and all UMD drain and
+kernel fence ordering. This is deliberately narrower than no_staggered_submit.
+
+Use the existing uniform push-descriptor path for root CBVs on MoltenVK.
+No volatile descriptor-table hoisting or shader math/robustness relaxation.
+The bindless flags already participate in the shader interface cache key;
+force_raw_va_cbv remains an explicit diagnostic override.
+
+2026-10-03, M1 Max 24 GPU, Windows ARM64 4 vCPU/8 GiB, WLE 1.1 DX12:
+6255 / 37.46 fps with uniform CBVs + MoltenVK 0142 and original submit policy;
+7048 / 42.21 fps with this narrower submit policy and VKD3D_CONFIG empty
+(+12.68%). Supplied unmodified baseline: 5126 / 30.70 fps. The broader
+no_staggered_submit experiment on the baseline reached 6677 / 39.98 fps.
+Root-CBV-only exploratory results 6760 / 40.48 and 6801 / 40.73 fps were
+small; no isolated CBV gain is claimed. See docs/wle-performance-2026-10-03.md
+for final repeated scores, correctness checks and residual gap.
+
+--- a/libs/vkd3d/state.c
++++ b/libs/vkd3d/state.c
+@@ -7888,7 +7888,8 @@
+      * which is great. */
+     if (VKD3D_CONFIG_FLAG_IS_SET(FORCE_RAW_VA_CBV) ||
+             (device_info->properties2.properties.vendorID != VKD3D_VENDOR_ID_NVIDIA &&
+-	     device_info->properties2.properties.vendorID != VKD3D_VENDOR_ID_QUALCOMM))
++             device_info->properties2.properties.vendorID != VKD3D_VENDOR_ID_QUALCOMM &&
++             device_info->vulkan_1_2_properties.driverID != VK_DRIVER_ID_MOLTENVK))
+         flags |= VKD3D_RAW_VA_ROOT_DESCRIPTOR_CBV;
+ 
+     if (device_info->properties2.properties.vendorID == VKD3D_VENDOR_ID_NVIDIA &&
+--- a/libs/vkd3d/command.c
++++ b/libs/vkd3d/command.c
+@@ -25481,7 +25481,12 @@
+             /* Enable staggered submission logic if graphics and non-graphics
+              * queues are active at the same time. This should only happen on
+              * devices with one queue family, or when setting single_queue. */
+-            if (q->desc.Type != command_queue->desc.Type &&
++            /* MoltenVK's single native queue already orders mixed submissions.
++             * A host wait after every command buffer only prevents CPU encoding
++             * from overlapping GPU execution. Keep priority staggering below and
++             * CPU resolution of cross-queue waits (needs_cpu_waits) unchanged. */
++            if (command_queue->device->device_info.vulkan_1_2_properties.driverID != VK_DRIVER_ID_MOLTENVK &&
++                    q->desc.Type != command_queue->desc.Type &&
+                     (q->desc.Type == D3D12_COMMAND_LIST_TYPE_DIRECT || command_queue->desc.Type == D3D12_COMMAND_LIST_TYPE_DIRECT))
+             {
+                 ret = true;
