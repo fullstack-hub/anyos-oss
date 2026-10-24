@@ -29,15 +29,6 @@
 #include "vkd3d_renderdoc.h"
 #endif
 
-/* The shipped SW ABI31 profile (on by default since 2026-10-07: a build define
- * made main builds differ from the installed UMD). 0 only for comparisons. */
-#ifndef ANYOS_SW_ABI31_REDUCED_PROFILE
-#define ANYOS_SW_ABI31_REDUCED_PROFILE 1
-#endif
-#if ANYOS_SW_ABI31_REDUCED_PROFILE != 0 && ANYOS_SW_ABI31_REDUCED_PROFILE != 1
-#error ANYOS_SW_ABI31_REDUCED_PROFILE must be 0 or 1
-#endif
-
 static uint32_t vkd3d_get_vk_version(void)
 {
     int major, minor, patch;
@@ -136,7 +127,6 @@ static const struct vkd3d_optional_extension_info optional_device_extensions[] =
     VK_EXTENSION(EXT_IMAGE_SLICED_VIEW_OF_3D, EXT_image_sliced_view_of_3d),
     VK_EXTENSION(EXT_GRAPHICS_PIPELINE_LIBRARY, EXT_graphics_pipeline_library),
     VK_EXTENSION(EXT_FRAGMENT_SHADER_INTERLOCK, EXT_fragment_shader_interlock),
-    VK_EXTENSION(EXT_SAMPLE_LOCATIONS, EXT_sample_locations),
     VK_EXTENSION(EXT_PAGEABLE_DEVICE_LOCAL_MEMORY, EXT_pageable_device_local_memory),
     VK_EXTENSION(EXT_MEMORY_PRIORITY, EXT_memory_priority),
     VK_EXTENSION(EXT_DYNAMIC_RENDERING_UNUSED_ATTACHMENTS, EXT_dynamic_rendering_unused_attachments),
@@ -1260,12 +1250,6 @@ static void vkd3d_physical_device_info_init(struct vkd3d_physical_device_info *i
     {
         info->conservative_rasterization_properties.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_CONSERVATIVE_RASTERIZATION_PROPERTIES_EXT;
         vk_prepend_struct(&info->properties2, &info->conservative_rasterization_properties);
-    }
-
-    if (vulkan_info->EXT_sample_locations)
-    {
-        info->sample_locations_properties.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SAMPLE_LOCATIONS_PROPERTIES_EXT;
-        vk_prepend_struct(&info->properties2, &info->sample_locations_properties);
     }
 
     if (vulkan_info->EXT_custom_border_color)
@@ -2473,10 +2457,8 @@ static HRESULT vkd3d_init_device_caps(struct d3d12_device *device,
 
     if (!physical_device_info->xfb_properties.transformFeedbackQueries)
     {
-        WARN("Lacking support for transform feedback; stream-output support is disabled.\n");
-        vulkan_info->EXT_transform_feedback = false;
-        physical_device_info->xfb_features.transformFeedback = VK_FALSE;
-        physical_device_info->xfb_features.geometryStreams = VK_FALSE;
+        ERR("Lacking support for transform feedback.\n");
+        return E_INVALIDARG;
     }
 
     single_storage_texel =
@@ -2490,17 +2472,8 @@ static HRESULT vkd3d_init_device_caps(struct d3d12_device *device,
 
     if (!single_storage_texel || !single_uniform_texel)
     {
-        /* AnyOS: MoltenVK reports no single-texel alignment once Metal argument buffers are
-         * on (its emulation exists only for direct bindings; texel buffer offsets must then
-         * be 16-byte aligned).  Typed buffer views always go through the typed offset buffer
-         * here (no descriptor buffers), and vkd3d_buffer_view_get_aligned_view quantizes the
-         * Vulkan view to a large power-of-two element boundary, so the byte offset handed to
-         * the driver is aligned for every view that fits maxTexelBufferElements with room to
-         * spare; the shader applies the element offset.  Accept the device. */
-        WARN("Lacking support for single texel alignment; relying on quantized typed buffer views "
-                "(offset alignment: uniform %u, storage %u bytes).\n",
-                (unsigned int)physical_device_info->vulkan_1_3_properties.uniformTexelBufferOffsetAlignmentBytes,
-                (unsigned int)physical_device_info->vulkan_1_3_properties.storageTexelBufferOffsetAlignmentBytes);
+        ERR("Lacking support for single texel alignment.\n");
+        return E_INVALIDARG;
     }
 
     /* Disable unused Vulkan features. The following features need to remain enabled
@@ -2622,9 +2595,8 @@ static HRESULT vkd3d_init_device_caps(struct d3d12_device *device,
     if (!physical_device_info->robustness2_features.robustBufferAccess2 ||
             !physical_device_info->robustness2_features.robustImageAccess2)
     {
-        WARN("Robustness2 access features are unavailable; robust buffer and image access are disabled.\n");
-        physical_device_info->robustness2_features.robustBufferAccess2 = VK_FALSE;
-        physical_device_info->robustness2_features.robustImageAccess2 = VK_FALSE;
+        ERR("Robustness2 features not supported. This is required.\n");
+        return E_INVALIDARG;
     }
 
     if (!physical_device_info->robustness2_features.nullDescriptor)
@@ -8203,7 +8175,7 @@ static void d3d12_device_create_sampler_feedback_desc(D3D12_UNORDERED_ACCESS_VIE
 {
     /* We really mean 64-bit here, but reusing the UAV path simplifies things. */
     memset(uav_desc, 0, sizeof(*uav_desc));
-    uav_desc->Format = DXGI_FORMAT_R32_UINT; /* AnyOS: two interleaved 32-bit planes. */
+    uav_desc->Format = DXGI_FORMAT_R32G32_UINT;
 
     if (feedback && feedback->desc.DepthOrArraySize > 1)
     {
@@ -9121,30 +9093,9 @@ static D3D12_MESH_SHADER_TIER d3d12_device_determine_mesh_shader_tier(struct d3d
 
 static D3D12_SAMPLER_FEEDBACK_TIER d3d12_device_determine_sampler_feedback_tier(struct d3d12_device *device)
 {
-    const struct vkd3d_vk_device_procs *vk_procs = &device->vk_procs;
-    static const VkImageUsageFlags usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_STORAGE_BIT |
-            VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
-    VkImageFormatProperties image_properties;
-    VkFormatProperties properties;
-
-    /* AnyOS: the feedback map is two interleaved R32_UINT planes, written with
-     * 32-bit image atomicOr (Metal has no 64-bit image atomicOr), so 64-bit image
-     * atomics are not needed. Require exactly what the WriteSamplerFeedback
-     * lowering and the resolve shaders use: R32_UINT storage-image atomics on an
-     * optimal 2D (array) image twice the width of a 16k / 4 feedback map,
-     * helper-lane detection for implicit-LOD writes, and fragment stores. */
-    VK_CALL(vkGetPhysicalDeviceFormatProperties(device->vk_physical_device, VK_FORMAT_R32_UINT, &properties));
-    if (!(properties.optimalTilingFeatures & VK_FORMAT_FEATURE_STORAGE_IMAGE_ATOMIC_BIT) ||
-            !(properties.optimalTilingFeatures & VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT))
+    if (!device->device_info.features2.features.shaderInt64)
         return D3D12_SAMPLER_FEEDBACK_TIER_NOT_SUPPORTED;
-    if (VK_CALL(vkGetPhysicalDeviceImageFormatProperties(device->vk_physical_device, VK_FORMAT_R32_UINT,
-            VK_IMAGE_TYPE_2D, VK_IMAGE_TILING_OPTIMAL, usage, 0, &image_properties)) != VK_SUCCESS)
-        return D3D12_SAMPLER_FEEDBACK_TIER_NOT_SUPPORTED;
-    if (image_properties.maxExtent.width < 2 * (D3D12_REQ_TEXTURE2D_U_OR_V_DIMENSION / 4 + 16) ||
-            image_properties.maxArrayLayers < D3D12_REQ_TEXTURE2D_ARRAY_AXIS_DIMENSION)
-        return D3D12_SAMPLER_FEEDBACK_TIER_NOT_SUPPORTED;
-    if (!device->device_info.vulkan_1_3_features.shaderDemoteToHelperInvocation ||
-            !device->device_info.features2.features.fragmentStoresAndAtomics)
+    if (!device->device_info.shader_image_atomic_int64_features.shaderImageInt64Atomics)
         return D3D12_SAMPLER_FEEDBACK_TIER_NOT_SUPPORTED;
 
     /* Enough for FL 12.2. */
@@ -9182,8 +9133,7 @@ uint32_t d3d12_device_get_max_descriptor_heap_size(struct d3d12_device *device, 
             }
             else
             {
-                /* AnyOS: computed per device, see vkd3d_bindless_state_init_limits. */
-                return max(device->bindless_state.max_view_descriptors, VKD3D_MIN_VIEW_DESCRIPTOR_COUNT);
+                return VKD3D_MIN_VIEW_DESCRIPTOR_COUNT;
             }
 
         case D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER:
@@ -9322,70 +9272,14 @@ static void d3d12_device_caps_init_feature_options1(struct d3d12_device *device)
     FIXME("TotalLaneCount = %u, may be inaccurate.\n", options1->TotalLaneCount);
 }
 
-static D3D12_PROGRAMMABLE_SAMPLE_POSITIONS_TIER d3d12_device_determine_programmable_sample_positions_tier(
-        struct d3d12_device *device)
-{
-    const VkPhysicalDeviceSampleLocationsPropertiesEXT *props = &device->device_info.sample_locations_properties;
-    const VkPhysicalDeviceLimits *limits = &device->device_info.properties2.properties.limits;
-    const struct vkd3d_vk_instance_procs *vk_procs = &device->vkd3d_instance->vk_procs;
-    VkMultisamplePropertiesEXT multisample_props;
-    VkSampleCountFlags msaa_counts;
-    VkSampleCountFlagBits count;
-
-    if (!device->vk_info.EXT_sample_locations)
-        return D3D12_PROGRAMMABLE_SAMPLE_POSITIONS_TIER_NOT_SUPPORTED;
-
-    /* Pipeline libraries build the multisample state in a separate fragment output
-     * library, which does not carry sample locations. */
-    if (device->device_info.graphics_pipeline_library_features.graphicsPipelineLibrary)
-    {
-        INFO("Programmable sample positions are not wired for graphics pipeline libraries.\n");
-        return D3D12_PROGRAMMABLE_SAMPLE_POSITIONS_TIER_NOT_SUPPORTED;
-    }
-
-    /* D3D12 positions are 1/16 pixel steps in [-8, 7] around the pixel centre, i.e. [0, 15/16]
-     * in Vulkan, and SetSamplePositions may change them between draws of one render pass. */
-    if (!props->variableSampleLocations || props->sampleLocationSubPixelBits < 4 ||
-            props->sampleLocationCoordinateRange[0] > 0.0f ||
-            props->sampleLocationCoordinateRange[1] < 15.0f / 16.0f)
-    {
-        INFO("VK_EXT_sample_locations properties do not cover D3D12 sample positions.\n");
-        return D3D12_PROGRAMMABLE_SAMPLE_POSITIONS_TIER_NOT_SUPPORTED;
-    }
-
-    /* Every multisampled count the device renders must take programmable positions. */
-    msaa_counts = limits->framebufferColorSampleCounts & limits->framebufferDepthSampleCounts &
-            (VK_SAMPLE_COUNT_2_BIT | VK_SAMPLE_COUNT_4_BIT | VK_SAMPLE_COUNT_8_BIT | VK_SAMPLE_COUNT_16_BIT);
-    if (!msaa_counts || (props->sampleLocationSampleCounts & msaa_counts) != msaa_counts)
-    {
-        INFO("Sample location counts %#x do not cover the multisample counts %#x.\n",
-                props->sampleLocationSampleCounts, msaa_counts);
-        return D3D12_PROGRAMMABLE_SAMPLE_POSITIONS_TIER_NOT_SUPPORTED;
-    }
-
-    /* Tier 2 takes a 2x2 pixel pattern at every count. */
-    for (count = VK_SAMPLE_COUNT_2_BIT; count <= VK_SAMPLE_COUNT_16_BIT; count <<= 1)
-    {
-        if (!(msaa_counts & count))
-            continue;
-        memset(&multisample_props, 0, sizeof(multisample_props));
-        multisample_props.sType = VK_STRUCTURE_TYPE_MULTISAMPLE_PROPERTIES_EXT;
-        VK_CALL(vkGetPhysicalDeviceMultisamplePropertiesEXT(device->vk_physical_device, count, &multisample_props));
-        if (multisample_props.maxSampleLocationGridSize.width < 2 ||
-                multisample_props.maxSampleLocationGridSize.height < 2)
-            return D3D12_PROGRAMMABLE_SAMPLE_POSITIONS_TIER_1;
-    }
-
-    return D3D12_PROGRAMMABLE_SAMPLE_POSITIONS_TIER_2;
-}
-
 static void d3d12_device_caps_init_feature_options2(struct d3d12_device *device)
 {
     const VkPhysicalDeviceFeatures *features = &device->device_info.features2.features;
     D3D12_FEATURE_DATA_D3D12_OPTIONS2 *options2 = &device->d3d12_caps.options2;
 
     options2->DepthBoundsTestSupported = features->depthBounds;
-    options2->ProgrammableSamplePositionsTier = d3d12_device_determine_programmable_sample_positions_tier(device);
+    /* Requires VK_EXT_sample_locations */
+    options2->ProgrammableSamplePositionsTier = D3D12_PROGRAMMABLE_SAMPLE_POSITIONS_TIER_NOT_SUPPORTED;
 }
 
 static void d3d12_device_caps_init_feature_options3(struct d3d12_device *device)
@@ -9774,26 +9668,9 @@ static void d3d12_device_caps_shader_model_override(struct d3d12_device *device)
     }
     else
     {
-        /* The private profile may be lowered, never raised past detection. */
-        if (ANYOS_SW_ABI31_REDUCED_PROFILE)
-            sm_override = min(sm_override, device->d3d12_caps.max_shader_model);
         device->d3d12_caps.max_shader_model = sm_override;
-        if (ANYOS_SW_ABI31_REDUCED_PROFILE)
-            WARN("Limiting reduced-profile shader model: %#x.\n", sm_override);
-        else
-            WARN("Overriding supported shader model: %s.\n", sm_string);
+        WARN("Overriding supported shader model: %s.\n", sm_string);
     }
-}
-
-/* Pure promotion policy; the caller still requires SM 6.5 and all backend
- * subgroup operations (including arithmetic). OPTIONS1 is not initialized yet.
- * Disabling application WaveOps does not disable derivative implementation ops. */
-static bool d3d12_device_caps_sm66_supported(bool linear_derivatives, bool legacy_nvidia,
-        bool buffer_atomic64, bool shader_int8, bool required_wave_size)
-{
-    return (linear_derivatives || (!ANYOS_SW_ABI31_REDUCED_PROFILE && legacy_nvidia)) &&
-            (ANYOS_SW_ABI31_REDUCED_PROFILE || buffer_atomic64) && shader_int8 &&
-            (ANYOS_SW_ABI31_REDUCED_PROFILE || required_wave_size);
 }
 
 static void d3d12_device_caps_init_shader_model(struct d3d12_device *device)
@@ -9862,10 +9739,6 @@ static void d3d12_device_caps_init_shader_model(struct d3d12_device *device)
             }
         }
 
-        /* AnyOS: no MoltenVK waiver. MoltenVK (0184) reports FP32 DenormPreserve
-         * and DenormFlushToZero with 32-bit independence because SPIRV-Cross
-         * (0181/0183) implements both modes, so the upstream gate above decides. */
-
         if (denorm_behavior)
         {
             device->d3d12_caps.max_shader_model = D3D_SHADER_MODEL_6_2;
@@ -9920,12 +9793,11 @@ static void d3d12_device_caps_init_shader_model(struct d3d12_device *device)
          * - RayPayload attribute (purely metadata in DXIL land, irrelevant for us).
          */
         if (device->d3d12_caps.max_shader_model == D3D_SHADER_MODEL_6_5 &&
-                d3d12_device_caps_sm66_supported(
-                        device->device_info.compute_shader_derivatives_features_khr.computeDerivativeGroupLinear,
-                        device->device_info.vulkan_1_2_properties.driverID == VK_DRIVER_ID_NVIDIA_PROPRIETARY,
-                        device->device_info.vulkan_1_2_features.shaderBufferInt64Atomics,
-                        device->device_info.vulkan_1_2_features.shaderInt8,
-                        d3d12_device_supports_required_subgroup_size_for_stage(device, VK_SHADER_STAGE_COMPUTE_BIT)))
+                (device->device_info.compute_shader_derivatives_features_khr.computeDerivativeGroupLinear ||
+                        device->device_info.vulkan_1_2_properties.driverID == VK_DRIVER_ID_NVIDIA_PROPRIETARY) &&
+                device->device_info.vulkan_1_2_features.shaderBufferInt64Atomics &&
+                device->device_info.vulkan_1_2_features.shaderInt8 &&
+                d3d12_device_supports_required_subgroup_size_for_stage(device, VK_SHADER_STAGE_COMPUTE_BIT))
         {
             INFO("Enabling support for SM 6.6.\n");
             if (!device->device_info.compute_shader_derivatives_features_khr.computeDerivativeGroupLinear)
@@ -9955,8 +9827,7 @@ static void d3d12_device_caps_init_shader_model(struct d3d12_device *device)
          * - Integer sampling (AdvancedTextureOps)
          *   - Trivial Vulkan catch-up. Requires implementing border colors as well.
          */
-        if (!ANYOS_SW_ABI31_REDUCED_PROFILE &&
-                device->d3d12_caps.max_shader_model == D3D_SHADER_MODEL_6_6 && ((
+        if (device->d3d12_caps.max_shader_model == D3D_SHADER_MODEL_6_6 && ((
                 device->device_info.shader_maximal_reconvergence_features.shaderMaximalReconvergence &&
                 device->device_info.shader_quad_control_features.shaderQuadControl) ||
                 VKD3D_CONFIG_FLAG_IS_SET(ENABLE_EXPERIMENTAL_FEATURES)))
@@ -10050,14 +9921,6 @@ static void d3d12_device_caps_override(struct d3d12_device *device)
         return;
     }
 
-    if (ANYOS_SW_ABI31_REDUCED_PROFILE)
-    {
-        /* A feature-level override must not fabricate caps or undo the profile. */
-        caps->max_feature_level = min(caps->max_feature_level, fl_override);
-        WARN("Limiting reduced-profile feature level: %#x.\n", caps->max_feature_level);
-        return;
-    }
-
     if (fl_override >= D3D_FEATURE_LEVEL_11_1)
         caps->options.OutputMergerLogicOp = TRUE;
 
@@ -10091,25 +9954,6 @@ static void d3d12_device_caps_override(struct d3d12_device *device)
     WARN("Overriding feature level: %#x.\n", fl_override);
 }
 
-#if ANYOS_SW_ABI31_REDUCED_PROFILE
-static void d3d12_device_caps_apply_reduced_profile(struct d3d12_caps *caps)
-{
-    caps->max_shader_model = min(caps->max_shader_model, D3D_SHADER_MODEL_6_6);
-    /* Keep genuine lane topology for the compiler's internal subgroup use. */
-    caps->options9.AtomicInt64OnTypedResourceSupported = FALSE;
-    caps->options9.AtomicInt64OnGroupSharedSupported = FALSE;
-    caps->options11.AtomicInt64OnDescriptorHeapResourceSupported = FALSE;
-    caps->options9.DerivativesInMeshAndAmplificationShadersSupported = FALSE;
-    caps->options9.MeshShaderSupportsFullRangeRenderTargetArrayIndex = FALSE;
-    caps->options9.MeshShaderPipelineStatsSupported = FALSE;
-    caps->options9.WaveMMATier = D3D12_WAVE_MMA_TIER_NOT_SUPPORTED;
-    caps->options10.MeshShaderPerPrimitiveShadingRateSupported = FALSE;
-    caps->options21.WorkGraphsTier = D3D12_WORK_GRAPHS_TIER_NOT_SUPPORTED;
-    /* ResourceBindingTier stays 3: direct heap indexing remains a mandatory
-     * unresolved integration gate. Native16 keeps its actual feature checks. */
-}
-#endif
-
 static void d3d12_device_caps_init(struct d3d12_device *device)
 {
     d3d12_device_caps_init_shader_model(device);
@@ -10139,18 +9983,10 @@ static void d3d12_device_caps_init(struct d3d12_device *device)
     d3d12_device_caps_init_feature_options21(device);
     d3d12_device_caps_init_feature_options22(device);
     d3d12_device_caps_init_feature_tight_alignment(device);
-#if ANYOS_SW_ABI31_REDUCED_PROFILE
-    /* Apply app overrides before the final profile and feature-level decision.
-     * Neither app overrides nor VKD3D_FEATURE_LEVEL can reinflate profile caps. */
-    d3d12_device_caps_override_application(device);
-    d3d12_device_caps_apply_reduced_profile(&device->d3d12_caps);
-#endif
     d3d12_device_caps_init_feature_level(device);
 
     d3d12_device_caps_override(device);
-#if !ANYOS_SW_ABI31_REDUCED_PROFILE
     d3d12_device_caps_override_application(device);
-#endif
 }
 
 static void vkd3d_init_shader_extensions(struct d3d12_device *device)

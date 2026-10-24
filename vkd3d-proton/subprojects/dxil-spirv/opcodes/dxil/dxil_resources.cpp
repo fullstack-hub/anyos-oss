@@ -1200,7 +1200,6 @@ static bool build_load_resource_handle(Converter::Impl &impl, spv::Id base_resou
 
 		impl.add(op);
 		resource_id = op->id;
-		impl.resource_access_chain_base[op->id] = { base_resource_id, offset_id };
 	}
 
 	if (ptr_id)
