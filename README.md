@@ -1,7 +1,7 @@
 # Any OS open-source components
 
 The source of the open-source components Any OS ships under the GPL and LGPL,
-with the changes Any OS made to them. Each release has a tag (`v0.1.6` is
+with the changes Any OS made to them. Each release has a tag (`v0.2.0` is
 this tree): the commit before an "Any OS changes" commit holds the unmodified
 upstream sources, so that commit's diff shows every change.
 

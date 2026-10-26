@@ -1,0 +1,12 @@
+drivers/gpu/drm/virtio from upstream stable v7.2.8
+(https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git, tag
+v7.2.8), fetched file by file on 2026-10-25. Omarchy's aarch64 kernel
+linux-omarchy 7.2.8-20 builds this driver unchanged: a build of these
+sources against linux-omarchy-headers 7.2.8-20 gives a virtio-gpu.ko whose
+.text is byte-identical to the one the package ships (both sha256
+14f1dc26dfbc7bec9cddcca4473801a2b2ee2934d3b9854a122044eb2a8c2a2b, GCC
+16.1.1 20260430). The AnyOS patch in ../patches-7.2 is ../patches-7.0's,
+ported: 7.2 adds VIRTIO_GPU_F_BLOB_ALIGNMENT (bit 5) to the feature table
+and a blob_alignment field, so the vblank feature (bit 20) and the third
+queue go next to them. GPL-2.0 (the kernel's licence), see each file's SPDX
+line.
