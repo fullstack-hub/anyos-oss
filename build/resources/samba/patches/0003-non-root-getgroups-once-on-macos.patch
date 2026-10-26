@@ -1,0 +1,50 @@
+--- a/source3/lib/system.c	2026-09-23 16:25:07
++++ b/source3/lib/system.c	2026-09-23 16:25:08
+@@ -892,6 +892,47 @@
+ 
+ int sys_getgroups(int setlen, gid_t *gidset)
+ {
++#if defined(__APPLE__)
++	/*
++	 * macOS getgroups() is getpwuid() plus getgrouplist(), two XPC round
++	 * trips to opendirectoryd, and smbd calls it on every become_root() --
++	 * several times per SMB2 CREATE. A server that does not run as root
++	 * (Any OS's per-VM smbd) can never change its groups, so the list is
++	 * read once per process; this took small-file copies from ~10 ms to a
++	 * fraction of that per file.
++	 */
++	if (geteuid() != 0) {
++		static gid_t *cached;
++		static int ncached = -1;
++		if (ncached < 0) {
++			int n = getgroups(0, NULL);
++			gid_t *list;
++			if (n < 0) {
++				return -1;
++			}
++			list = malloc(sizeof(gid_t) * (n > 0 ? n : 1));
++			if (list == NULL) {
++				return getgroups(setlen, gidset);
++			}
++			n = getgroups(n, list);
++			if (n < 0) {
++				free(list);
++				return -1;
++			}
++			cached = list;
++			ncached = n;
++		}
++		if (setlen == 0) {
++			return ncached;
++		}
++		if (setlen < ncached) {
++			errno = EINVAL;
++			return -1;
++		}
++		memcpy(gidset, cached, sizeof(gid_t) * ncached);
++		return ncached;
++	}
++#endif
+ #if defined(HAVE_BROKEN_GETGROUPS)
+ 	return sys_broken_getgroups(setlen, gidset);
+ #else
