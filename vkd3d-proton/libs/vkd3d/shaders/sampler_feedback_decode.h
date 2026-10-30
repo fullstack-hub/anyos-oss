@@ -19,48 +19,32 @@ layout(set = 0, binding = 1) uniform usampler2DArray Input;
 layout(set = 0, binding = 1) uniform usampler2D Input;
 #endif
 
-// AnyOS: the feedback map is two interleaved R32_UINT planes. Logical texel
-// (x, y) lives at (2x, y) for mips 0-7 and (2x + 1, y) for mips 8-14 plus the
-// encoded MinMip in the top 4 bits. Fetch exactly what the upstream
-// textureGather() with a nearest CLAMP_TO_EDGE sampler at an integer corner c
-// returned: texels c - 1 and c in each axis, clamped to the (padded) map.
-#ifdef ARRAY
-uint fetch_plane(ivec2 coord, int plane, float layer)
-{
-	return texelFetch(Input, ivec3(2 * coord.x + plane, coord.y, int(layer)), 0).x;
-}
-#else
-uint fetch_plane(ivec2 coord, int plane, float layer)
-{
-	return texelFetch(Input, ivec2(2 * coord.x + plane, coord.y), 0).x;
-}
-#endif
-
 bool fetch_mip(vec2 unnormalized_feedback_coord, int mip, float layer)
 {
-	// Get bottom-right (Y) as target region,
+	// Sample such that we get bottom-right (Y) as target region,
 	// and the potential neighbors in top-left (W), left (X) and up (Z).
 	// If we detect any writes in those neighbors, propagate them to the bottom-right.
-	ivec2 map_size = textureSize(Input, 0).xy;
-	map_size.x >>= 1;
-	ivec2 c = ivec2(unnormalized_feedback_coord);
-	ivec2 lo = clamp(c - 1, ivec2(0), map_size - 1);
-	ivec2 hi = clamp(c, ivec2(0), map_size - 1);
+	// By flooring the integer coordinate, we get the behavior we want.
 
-	int plane = 0;
-	if (mip >= 8)
-	{
-		plane = 1;
-		mip -= 8;
-	}
+#ifdef ARRAY
+	vec3 fcoord = vec3(unnormalized_feedback_coord * inv_feedback_resolution, layer);
+#else
+	vec2 fcoord = unnormalized_feedback_coord * inv_feedback_resolution;
+#endif
 
 	uvec4 values;
-	values.x = fetch_plane(ivec2(lo.x, hi.y), plane, layer);
-	values.y = fetch_plane(ivec2(hi.x, hi.y), plane, layer);
-	values.z = fetch_plane(ivec2(hi.x, lo.y), plane, layer);
-	values.w = fetch_plane(ivec2(lo.x, lo.y), plane, layer);
+	if (mip >= 8)
+	{
+		values = textureGather(Input, fcoord, 1);
+		mip -= 8;
+	}
+	else
+	{
+		values = textureGather(Input, fcoord, 0);
+	}
 
 	// Shift down to get the mip level we care about. Every mip gets 4 bits of data.
+	// This is enough for 16 mips.
 	uvec4 per_mip_bits = bitfieldExtract(values, 4 * mip, 4);
 
 	// Check self-access and neighbor access.
@@ -94,9 +78,15 @@ int sampler_feedback_decode_min_mip(ivec2 icoord, float layer)
 	if (fetch_mip(vec2(icoord), 0, layer))
 		return 0;
 
+#ifdef ARRAY
+	ivec3 fetch_coord = ivec3(icoord, layer);
+#else
+	ivec2 fetch_coord = icoord;
+#endif
+
 	// Extract encoded min-mip. This serves as our starting min-bound.
 	int result = 0xff;
-	uint high_bits = fetch_plane(icoord, 1, layer) >> 28;
+	uint high_bits = texelFetch(Input, fetch_coord, 0).y >> 28;
 	if (high_bits > 0)
 		result = int(high_bits - 1);
 
