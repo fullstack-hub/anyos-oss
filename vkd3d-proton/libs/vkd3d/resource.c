@@ -920,6 +920,11 @@ static HRESULT vkd3d_get_image_create_info(struct d3d12_device *device,
     image_info->mipLevels = min(desc->MipLevels, max_miplevel_count(desc));
     image_info->samples = vk_samples_from_dxgi_sample_desc(&desc->SampleDesc);
     image_info->tiling = format->vk_image_tiling;
+
+    /* Depth rendered with programmable sample positions (SetSamplePositions). */
+    if (image_info->samples > VK_SAMPLE_COUNT_1_BIT && (desc->Flags & D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL) &&
+            device->d3d12_caps.options2.ProgrammableSamplePositionsTier != D3D12_PROGRAMMABLE_SAMPLE_POSITIONS_TIER_NOT_SUPPORTED)
+        image_info->flags |= VK_IMAGE_CREATE_SAMPLE_LOCATIONS_COMPATIBLE_DEPTH_BIT_EXT;
     image_info->initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
 
     if (resource && (resource->flags & VKD3D_RESOURCE_COMMITTED) &&
@@ -6260,6 +6265,37 @@ static void vkd3d_buffer_view_get_bound_range_ssbo(
     }
 }
 
+static void vkd3d_buffer_view_check_texel_offset_alignment(struct d3d12_device *device,
+        DXGI_FORMAT format, unsigned int vk_flags, VkDeviceSize resource_offset,
+        VkDeviceSize first_element, VkDeviceSize structured_stride)
+{
+    const VkPhysicalDeviceVulkan13Properties *props = &device->device_info.vulkan_1_3_properties;
+    VkDeviceSize alignment, element_size;
+    bool single;
+
+    if (vk_flags & VKD3D_VIEW_BUFFER_SRV)
+    {
+        single = props->uniformTexelBufferOffsetSingleTexelAlignment;
+        alignment = props->uniformTexelBufferOffsetAlignmentBytes;
+    }
+    else
+    {
+        single = props->storageTexelBufferOffsetSingleTexelAlignment;
+        alignment = props->storageTexelBufferOffsetAlignmentBytes;
+    }
+
+    if (single || alignment <= 1)
+        return;
+
+    element_size = format ? vkd3d_get_format(device, format, false)->byte_count : structured_stride;
+    if ((resource_offset + first_element * element_size) % alignment)
+    {
+        FIXME_ONCE("Typed buffer view at byte offset %"PRIu64" violates the device's %"PRIu64" byte "
+                "texel buffer offset alignment (no single-texel alignment); the view is undefined.\n",
+                resource_offset + first_element * element_size, alignment);
+    }
+}
+
 static bool vkd3d_buffer_view_get_aligned_view(
         struct d3d12_device *device, struct d3d12_resource *resource,
         DXGI_FORMAT format, unsigned int vk_flags,
@@ -6332,6 +6368,12 @@ static bool vkd3d_buffer_view_get_aligned_view(
             first_element = begin_range;
             num_elements = end_range - begin_range;
         }
+
+        /* AnyOS: on a device without single-texel alignment (MoltenVK with Metal argument
+         * buffers) the quantized view offset is what keeps typed views legal; the boundary is
+         * huge unless the view nearly fills maxTexelBufferElements.  Say so when it is not. */
+        vkd3d_buffer_view_check_texel_offset_alignment(device, format, vk_flags,
+                resource->mem.offset, first_element, structured_stride);
     }
 
     if (!vkd3d_create_buffer_view_for_resource(device, resource, format,
@@ -10731,6 +10773,17 @@ HRESULT d3d12_query_heap_create(struct d3d12_device *device, const D3D12_QUERY_H
     VkQueryPoolCreateInfo pool_info;
     VkResult vr;
     HRESULT hr;
+
+    /* AnyOS: without transform feedback queries stream output is disabled
+     * (EXT_transform_feedback is turned off at device creation), and an
+     * SO_STATISTICS heap would reach vkCmdBeginQueryIndexedEXT, a NULL
+     * pointer then (D3D11On12 creating SO statistics queries crashed).
+     * Refuse the heap instead. */
+    if (desc->Type == D3D12_QUERY_HEAP_TYPE_SO_STATISTICS && !device->vk_info.EXT_transform_feedback)
+    {
+        WARN("Stream output is not supported, refusing an SO statistics query heap.\n");
+        return E_NOTIMPL;
+    }
 
     if (!(object = vkd3d_calloc(1, sizeof(*object))))
         return E_OUTOFMEMORY;

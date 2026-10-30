@@ -1,0 +1,7 @@
+{
+ "version": "4.24.7",
+ "sha256": "45b7747a47452eff2b2159a44cc63eb43690d339fd1069088e023a015fed06c7",
+ "source": "https://download.samba.org/pub/samba/stable/samba-4.24.7.tar.gz",
+ "license": "GPL-3.0-or-later",
+ "role": "shared-folders SMB server (smbd, pdbedit), a separate process the core runs per VM"
+}
