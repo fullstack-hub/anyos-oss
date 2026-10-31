@@ -41,8 +41,6 @@ EmulatedCommandContext::EmulatedCommandContext(WMT::Device device, InternalComma
   CREATE_PIPELINE(clear_texture_2d_array_float);
   CREATE_PIPELINE(clear_texture_3d_float);
   CREATE_PIPELINE(clear_texture_buffer_float);
-  CREATE_PIPELINE(so_scan);
-  CREATE_PIPELINE(so_write);
 
 
   auto gs_draw_arguments_marshal_vs = library.newFunction("gs_draw_arguments_marshal");
@@ -70,52 +68,6 @@ EmulatedCommandContext::setComputePipelineState(WMT::ComputePipelineState state,
   cmd.type = WMTComputeCommandSetPSO;
   cmd.pso = state;
   cmd.threadgroup_size = threadgroup_size;
-}
-
-void
-EmulatedCommandContext::StreamOutput(const StreamOutputPass &s) {
-  if (!so_scan_pipeline || !so_write_pipeline)
-    return;
-  auto bind = [&](WMT::Buffer buffer, uint64_t offset, uint8_t index) {
-    if (buffer)
-      setComputeBuffer(buffer, offset, index);
-    else
-      setComputeBuffer(s.state, s.state_offset, index);
-  };
-  // One threadgroup: per-patch counts from the records, their prefix sum, the
-  // clamp at the buffers, the filled sizes and the queries.
-  setComputePipelineState(so_scan_pipeline, {256, 1, 1});
-  bind(s.patch_offsets, s.patch_offsets_offset, 0);
-  bind(s.records, s.records_offset, 1);
-  bind(s.counters, s.counters_offset, 2);
-  bind(s.state, s.state_offset, 3);
-  setComputeBytes(&s.params, sizeof(s.params), 4);
-  for (unsigned i = 0; i < 4; i++)
-    bind(s.filled[i], s.filled_offset[i], 5 + i);
-  for (unsigned i = 0; i < 4; i++)
-    bind(s.queries[i], s.queries_offset[i], 9 + i);
-  dispatchThreads({256, 1, 1});
-  {
-    auto &cmd = ctx.encodeComputeCommand<wmtcmd_compute_memory_barrier>();
-    cmd.type = WMTComputeCommandMemoryBarrier;
-    cmd.scope = WMTBarrierScopeBuffers;
-  }
-  // A thread per workload record.
-  setComputePipelineState(so_write_pipeline, {64, 1, 1});
-  bind(s.records, s.records_offset, 0);
-  bind(s.patch_offsets, s.patch_offsets_offset, 1);
-  bind(s.counters, s.counters_offset, 2);
-  bind(s.state, s.state_offset, 3);
-  setComputeBytes(&s.params, sizeof(s.params), 4);
-  for (unsigned i = 0; i < 4; i++)
-    bind(s.targets[i], s.targets_offset[i], 5 + i);
-  bind(s.vertices, s.vertices_offset, 9);
-  bind(s.indices, s.indices_offset, 10);
-  if (s.element_bytes)
-    setComputeBytes(s.elements, s.element_bytes, 11);
-  else
-    bind({}, 0, 11);
-  dispatchThreads({std::max(s.params.record_capacity, 1u), 1, 1});
 }
 
 void EmulatedCommandContext::dispatchThreads(const WMTSize &grid_size) {
