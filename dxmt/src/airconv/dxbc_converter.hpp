@@ -332,13 +332,15 @@ struct SignatureContext {
   uint32_t unorm_output_reg_mask;
   uint32_t uint_output_reg_mask;
   uint32_t sint_output_reg_mask;
+  /* AnyOS: SV_PrimitiveID comes from the geometry shader's vertex attribute */
+  bool gs_primitive_id;
 
   SignatureContext(
     IREffect &prologue, IRValue &epilogue, air::FunctionSignatureBuilder &func_signature, io_binding_map &resource
   )
       : prologue(prologue), epilogue(epilogue), func_signature(func_signature), resource(resource), ia_layout(nullptr),
         dual_source_blending(false), disable_depth_output(false), skip_vertex_output(false), pull_mode_reg_mask(0),
-        unorm_output_reg_mask(0), uint_output_reg_mask(0), sint_output_reg_mask(0){};
+        unorm_output_reg_mask(0), uint_output_reg_mask(0), sint_output_reg_mask(0), gs_primitive_id(false){};
 };
 
 struct MeshOutputContext {
@@ -438,6 +440,8 @@ public:
   microsoft::D3D10_SB_PRIMITIVE_TOPOLOGY gs_output_topology = {};
   uint32_t gs_max_vertex_output = 0;
   uint32_t gs_instance_count = 1;
+  /* AnyOS: the geometry shader declares an SV_PrimitiveID output */
+  bool gs_writes_primitive_id = false;
 
   BasicBlock *entry() const {
     return bbs.front().get();

@@ -572,7 +572,10 @@ bool emit_dxbc_udiv_instruction(Converter::Impl &impl, const llvm::CallInst *ins
 	spv::Id id0 = impl.get_id_for_value(instruction->getOperand(1));
 	spv::Id id1 = impl.get_id_for_value(instruction->getOperand(2));
 
-	spv::Id type_id = impl.get_type_id(instruction->getType());
+	// The call returns dx.types.twoi32 {quotient, remainder}; the helpers and
+	// both calls work on the operand type (the struct as a helper type gave
+	// invalid SPIR-V: struct parameters called with i32 arguments).
+	spv::Id type_id = impl.get_type_id(instruction->getOperand(1)->getType());
 	spv::Id quot_id = impl.spirv_module.get_helper_call_id(HelperCall::UDiv, type_id);
 	spv::Id rem_id = impl.spirv_module.get_helper_call_id(HelperCall::UMod, type_id);
 
