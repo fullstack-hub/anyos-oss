@@ -1,0 +1,128 @@
+From: Any OS
+Subject: [PATCH] d3d11: rebuild the tessellation pipeline when the index format changes
+
+Problem: the object function of a tessellation (and geometry) pipeline pulls
+the indices itself, so the index buffer format (none / 16-bit / 32-bit) is
+compiled into the vertex-hull variant.  IASetIndexBuffer and a Draw/DrawIndexed
+switch only change the context state; FinalizeTessellationRenderPipeline
+returned early while the pipeline was still "ready", so a 16-bit object
+function was fed a 32-bit index buffer (and vice versa).  Read as ushorts, a
+32-bit index list yields every odd element as 0 and every even one from the
+wrong position: whole patches collapsed onto one vertex, drawn as huge
+flat triangles while the object vanished from its place (Unigine Heaven
+4.0, bridge and corridor scenes of a natural demo run, where R16 and R32
+tessellated draws alternate without a shader change in between; a demo
+run with one scene skipped happened to order the draws so that the
+pipeline was rebuilt anyway and looked clean).
+
+Fix: remember the index format the ready tessellation/geometry pipeline was
+built for and invalidate it when the next draw needs another one
+(DrawIndexBufferFormat / ready_pipeline_index_format_).
+
+Also set the tag of the domain variant's SM50_SHADER_GS_PASS_THROUGH_DATA, which
+was left uninitialised (the argument chain was walked from stack garbage), and
+salt the domain variant digest so cached conversions are redone.
+
+Verification (2026-10-03, M1 family, guest Windows 11 ARM64, Heaven DX11
+High, tessellation Normal, windowed 1920x1080, natural demo run, detector
+flicker.py t>20 over the 40 s bridge/corridor window): before 102-126 per
+run (6 runs), after 1, 0 and 0 (3 runs); the GPU-side control-point check
+that found the collapsed patches (all on R32_UINT draws) reports none.
+--- a/src/d3d11/d3d11_context_impl.cpp
++++ b/src/d3d11/d3d11_context_impl.cpp
+@@ -5374,11 +5374,33 @@
+     Desc.SampleCount = state_.OutputMerger.SampleCount;
+   }
+ 
++  // AnyOS: the object function of a tessellation (or geometry) pipeline pulls
++  // the indices itself, so the index buffer format is part of the compiled
++  // pipeline (ShaderVariantTessellationVertexHull::index_buffer_format,
++  // ShaderVariantGeometryVertex::index_buffer_format).  IASetIndexBuffer and a
++  // Draw/DrawIndexed switch change the format without invalidating the render
++  // pipeline, so a ready pipeline is only reused when it was built for the
++  // format of this draw.  A 16-bit object function fed a 32-bit index buffer
++  // read every odd index as 0 and every even one from the wrong element:
++  // whole patches collapsed onto one vertex (Unigine Heaven, 2026-10-03).
+   template <bool IndexedDraw>
++  SM50_INDEX_BUFFER_FORMAT
++  DrawIndexBufferFormat() {
++    if constexpr (IndexedDraw)
++      return state_.InputAssembler.IndexBufferFormat == DXGI_FORMAT_R32_UINT ? SM50_INDEX_BUFFER_FORMAT_UINT32
++                                                                             : SM50_INDEX_BUFFER_FORMAT_UINT16;
++    else
++      return SM50_INDEX_BUFFER_FORMAT_NONE;
++  }
++
++  template <bool IndexedDraw>
+   DrawCallStatus
+   FinalizeTessellationRenderPipeline() {
+-    if (cmdbuf_state == CommandBufferState::TessellationRenderPipelineReady)
+-      return DrawCallStatus::Tessellation;
++    if (cmdbuf_state == CommandBufferState::TessellationRenderPipelineReady) {
++      if (ready_pipeline_index_format_ == DrawIndexBufferFormat<IndexedDraw>())
++        return DrawCallStatus::Tessellation;
++      InvalidateRenderPipeline();
++    }
+     auto HS = GetManagedShader<PipelineStage::Hull>();
+     if (!HS) {
+       return DrawCallStatus::Invalid;
+@@ -5403,6 +5425,7 @@
+ 
+     MTL_GRAPHICS_PIPELINE_DESC pipelineDesc;
+     InitializeGraphicsPipelineDesc<IndexedDraw>(pipelineDesc);
++    ready_pipeline_index_format_ = pipelineDesc.IndexBufferFormat;
+ 
+     if (FAILED(device->CreateTessellationMeshPipeline(&pipelineDesc, &pipeline))) {
+       return DrawCallStatus::Invalid;
+@@ -5499,8 +5522,11 @@
+   template <bool IndexedDraw>
+   DrawCallStatus
+   FinalizeGeometryRenderPipeline() {
+-    if (cmdbuf_state == CommandBufferState::GeometryRenderPipelineReady)
+-      return DrawCallStatus::Geometry;
++    if (cmdbuf_state == CommandBufferState::GeometryRenderPipelineReady) {
++      if (ready_pipeline_index_format_ == DrawIndexBufferFormat<IndexedDraw>())
++        return DrawCallStatus::Geometry;
++      InvalidateRenderPipeline();
++    }
+     if (!SwitchToRenderEncoder()) {
+       return DrawCallStatus::Invalid;
+     }
+@@ -5509,6 +5535,7 @@
+ 
+     MTL_GRAPHICS_PIPELINE_DESC pipelineDesc;
+     InitializeGraphicsPipelineDesc<IndexedDraw>(pipelineDesc);
++    ready_pipeline_index_format_ = pipelineDesc.IndexBufferFormat;
+     device->CreateGeometryPipeline(&pipelineDesc, &pipeline);
+     EmitST([pso = std::move(pipeline)](ArgumentEncodingContext& enc) {
+       auto render_encoder = enc.currentRenderEncoder();
+@@ -5913,6 +5940,8 @@
+   D3D11UserDefinedAnnotation annotation_;
+   MTLD3D11ContextExt<ContextInternalState> ext_;
+   uint64_t max_object_threadgroups_;
++  // AnyOS: index buffer format the ready tessellation/geometry pipeline was built for
++  SM50_INDEX_BUFFER_FORMAT ready_pipeline_index_format_ = SM50_INDEX_BUFFER_FORMAT_NONE;
+   bool tess_gs_active_ = false; // AnyOS: the bound tessellation pipeline feeds a geometry shader
+   bool tess_so_active_ = false; // AnyOS: the bound tessellation pipeline feeds stream output
+   std::vector<uint32_t> tess_so_elements_; // (register, component, slot, byte offset) per element
+--- a/src/d3d11/d3d11_shader.cpp
++++ b/src/d3d11/d3d11_shader.cpp
+@@ -302,11 +302,18 @@
+   // AnyOS: hashed only when set, so every other domain variant keeps its digest
+   if (variant.stream_output)
+     h.update(variant.stream_output);
++  // AnyOS: 0017 sets the SM50_SHADER_GS_PASS_THROUGH tag the domain variant's
++  // compilation chain was walked without; conversions cached before it are not
++  // replayed.
++  h.update(uint32_t(0x4f720017));
+   auto variant_digest = h.final();
+   std::string func_name = "ds_" + shader->sha1().string().substr(0, 8) + "_" + variant_digest.string() + "_a" + std::to_string(AIRCONV_VERSION);
+   auto proc = [=](const char *func_name, SM50_SHADER_COMMON_DATA *common) -> sm50_bitcode_t  {
+     SM50_SHADER_GS_PASS_THROUGH_DATA gs_passthrough;
+     SM50_SHADER_PSO_TESSELLATOR_DATA pso_tess;
++    // AnyOS: the tag was never set, so the argument chain was walked from an
++    // uninitialised type (whatever matched was taken for that node).
++    gs_passthrough.type = SM50_SHADER_GS_PASS_THROUGH;
+     gs_passthrough.DataEncoded = variant.gs_passthrough;
+     gs_passthrough.RasterizationDisabled = variant.rasterization_disabled;
+     gs_passthrough.next = &pso_tess;

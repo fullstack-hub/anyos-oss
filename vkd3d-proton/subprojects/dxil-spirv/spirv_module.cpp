@@ -78,6 +78,8 @@ struct SPIRVModule::Impl : BlockEmissionInterface
 	spv::Id build_quad_any(SPIRVModule &module);
 	spv::Id build_quad_vote(SPIRVModule &module, HelperCall call);
 	spv::Id build_image_atomic_r64_compact(SPIRVModule &module, bool array, bool non_uniform);
+	spv::Id build_feedback_write(SPIRVModule &module, const spv::Id *aux_ids, uint32_t aux_id_count);
+	UnorderedMap<uint64_t, spv::Id> feedback_write_call_ids;
 	spv::Id build_finish_cross_group_sharing(SPIRVModule &module);
 	spv::Id build_allocate_node_records(SPIRVModule &module, bool per_thread);
 	spv::Id build_increment_node_count(SPIRVModule &module, bool per_thread);
@@ -1355,6 +1357,208 @@ spv::Id SPIRVModule::Impl::build_image_atomic_r64_compact(
 
 	builder.setBuildPoint(current_build_point);
 	*call_id = func->getId();
+	return func->getId();
+}
+
+// AnyOS: WriteSamplerFeedback* on two interleaved 32-bit planes (see dxil_sampling.cpp).
+// Same subgroup coalescing as build_image_atomic_r64_compact(), but the helper
+// references the feedback resource's global variable (plus the descriptor index
+// for arrays and heaps) instead of taking an image pointer parameter: MSL
+// storage image access deduction (SPIRV-Cross) only loosens the global's
+// NonWritable/NonReadable for atomics it can trace to it, and declared the heap
+// read-only otherwise, which Metal rejects.
+// aux_ids: { base variable, arrayed image, indexed, non-uniform }.
+spv::Id SPIRVModule::Impl::build_feedback_write(SPIRVModule &module, const spv::Id *aux_ids, uint32_t aux_id_count)
+{
+	if (aux_id_count != 4)
+		return 0;
+
+	spv::Id base_var_id = aux_ids[0];
+	bool array = aux_ids[1] != 0;
+	bool indexed = aux_ids[2] != 0;
+	bool non_uniform = aux_ids[3] != 0;
+	uint64_t key = (uint64_t(base_var_id) << 3) | (array ? 1 : 0) | (indexed ? 2 : 0) | (non_uniform ? 4 : 0);
+
+	auto itr = feedback_write_call_ids.find(key);
+	if (itr != feedback_write_call_ids.end())
+		return itr->second;
+
+	builder.addCapability(spv::CapabilityGroupNonUniform);
+	builder.addCapability(spv::CapabilityGroupNonUniformBallot);
+	builder.addCapability(spv::CapabilityGroupNonUniformArithmetic);
+	auto *current_build_point = builder.getBuildPoint();
+
+	spv::Id image_type = builder.makeImageType(builder.makeUintType(32),
+	                                           spv::Dim2D, false, array, false, 2, spv::ImageFormatR32ui);
+	spv::Id ptr_image_type = builder.makePointer(spv::StorageClassUniformConstant, image_type);
+
+	spv::Block *entry = nullptr;
+	spv::Id bool_type = builder.makeBoolType();
+	spv::Id int_type = builder.makeIntType(32);
+	spv::Id uint_type = builder.makeUintType(32);
+	spv::Id coord_type = builder.makeVectorType(int_type, array ? 3 : 2);
+	spv::Id bvec_type = builder.makeVectorType(bool_type, array ? 3 : 2);
+	spv::Id ptr_atomic_type = builder.makePointer(spv::StorageClassImage, uint_type);
+
+	Vector<spv::Id> param_types;
+	if (indexed)
+		param_types.push_back(uint_type);
+	param_types.push_back(coord_type);
+	param_types.push_back(uint_type);
+	param_types.push_back(bool_type);
+
+	auto *func = builder.makeFunctionEntry(spv::NoPrecision, builder.makeVoidType(),
+	                                       array ? "WriteFeedbackArray" : "WriteFeedback",
+	                                       { param_types.begin(), param_types.end() }, {}, &entry);
+
+	unsigned param = 0;
+	spv::Id index = indexed ? func->getParamId(param++) : 0;
+	spv::Id coord = func->getParamId(param++);
+	spv::Id value = func->getParamId(param++);
+	spv::Id active = func->getParamId(param++);
+
+	if (index)
+		builder.addName(index, "descriptor_index");
+	builder.addName(coord, "coord");
+	builder.addName(value, "value");
+	builder.addName(active, "active_lane");
+
+	auto *body_block = new spv::Block(builder.getUniqueId(), *func);
+	auto *merge_block = new spv::Block(builder.getUniqueId(), *func);
+	auto *loop_merge_block = new spv::Block(builder.getUniqueId(), *func);
+	auto *loop_body_block = new spv::Block(builder.getUniqueId(), *func);
+	auto *loop_continue_block = new spv::Block(builder.getUniqueId(), *func);
+	auto *write_block = new spv::Block(builder.getUniqueId(), *func);
+	auto *write_merge_block = new spv::Block(builder.getUniqueId(), *func);
+	auto *elect_block = new spv::Block(builder.getUniqueId(), *func);
+	auto *elect_merge_block = new spv::Block(builder.getUniqueId(), *func);
+
+	builder.setBuildPoint(entry);
+	builder.createSelectionMerge(merge_block, 0);
+	builder.createConditionalBranch(active, body_block, merge_block);
+
+	spv::Id var_is_done = builder.createVariableWithInitializer(spv::StorageClassFunction, bool_type,
+	                                                            builder.makeBoolConstant(false), "is_done");
+
+	builder.setBuildPoint(body_block);
+	{
+		auto load = std::make_unique<spv::Instruction>(builder.getUniqueId(), bool_type, spv::OpLoad);
+		auto inot = std::make_unique<spv::Instruction>(builder.getUniqueId(), bool_type, spv::OpLogicalNot);
+		spv::Id inot_id = inot->getResultId();
+		load->addIdOperand(var_is_done);
+		inot->addIdOperand(load->getResultId());
+		add_instruction(body_block, std::move(load));
+		add_instruction(body_block, std::move(inot));
+		builder.createLoopMerge(loop_merge_block, loop_continue_block, 0);
+		builder.createConditionalBranch(inot_id, loop_body_block, loop_merge_block);
+
+		builder.setBuildPoint(loop_body_block);
+		{
+			auto first = std::make_unique<spv::Instruction>(builder.getUniqueId(), coord_type, spv::OpGroupNonUniformBroadcastFirst);
+			auto compare_coord = std::make_unique<spv::Instruction>(builder.getUniqueId(), bvec_type, spv::OpIEqual);
+			auto all_equal = std::make_unique<spv::Instruction>(builder.getUniqueId(), bool_type, spv::OpAll);
+			spv::Id cond_id = all_equal->getResultId();
+
+			first->addIdOperand(builder.makeUintConstant(spv::ScopeSubgroup));
+			first->addIdOperand(coord);
+			compare_coord->addIdOperand(coord);
+			compare_coord->addIdOperand(first->getResultId());
+			all_equal->addIdOperand(compare_coord->getResultId());
+
+			add_instruction(loop_body_block, std::move(first));
+			add_instruction(loop_body_block, std::move(compare_coord));
+			add_instruction(loop_body_block, std::move(all_equal));
+
+			if (index)
+			{
+				// Lanes may name different feedback maps: coalesce only within one map.
+				auto first_index = std::make_unique<spv::Instruction>(builder.getUniqueId(), uint_type, spv::OpGroupNonUniformBroadcastFirst);
+				auto compare_index = std::make_unique<spv::Instruction>(builder.getUniqueId(), bool_type, spv::OpIEqual);
+				auto both = std::make_unique<spv::Instruction>(builder.getUniqueId(), bool_type, spv::OpLogicalAnd);
+				first_index->addIdOperand(builder.makeUintConstant(spv::ScopeSubgroup));
+				first_index->addIdOperand(index);
+				compare_index->addIdOperand(index);
+				compare_index->addIdOperand(first_index->getResultId());
+				both->addIdOperand(cond_id);
+				both->addIdOperand(compare_index->getResultId());
+				cond_id = both->getResultId();
+				add_instruction(loop_body_block, std::move(first_index));
+				add_instruction(loop_body_block, std::move(compare_index));
+				add_instruction(loop_body_block, std::move(both));
+			}
+
+			auto store = std::make_unique<spv::Instruction>(spv::OpStore);
+			store->addIdOperand(var_is_done);
+			store->addIdOperand(cond_id);
+			add_instruction(loop_body_block, std::move(store));
+
+			builder.createSelectionMerge(write_merge_block, 0);
+			builder.createConditionalBranch(cond_id, write_block, write_merge_block);
+			builder.setBuildPoint(write_block);
+			{
+				auto or_op = std::make_unique<spv::Instruction>(builder.getUniqueId(), uint_type, spv::OpGroupNonUniformBitwiseOr);
+				auto elect = std::make_unique<spv::Instruction>(builder.getUniqueId(), bool_type, spv::OpGroupNonUniformElect);
+				or_op->addIdOperand(builder.makeUintConstant(spv::ScopeSubgroup));
+				or_op->addImmediateOperand(spv::GroupOperationReduce);
+				or_op->addIdOperand(value);
+				elect->addIdOperand(builder.makeUintConstant(spv::ScopeSubgroup));
+				spv::Id elect_id = elect->getResultId();
+				spv::Id or_op_id = or_op->getResultId();
+				add_instruction(write_block, std::move(or_op));
+				add_instruction(write_block, std::move(elect));
+
+				builder.createSelectionMerge(elect_merge_block, 0);
+				builder.createConditionalBranch(elect_id, elect_block, elect_merge_block);
+				builder.setBuildPoint(elect_block);
+				{
+					spv::Id image_ptr = base_var_id;
+					if (index)
+					{
+						auto chain = std::make_unique<spv::Instruction>(builder.getUniqueId(), ptr_image_type, spv::OpAccessChain);
+						chain->addIdOperand(base_var_id);
+						chain->addIdOperand(index);
+						image_ptr = chain->getResultId();
+						if (non_uniform)
+							builder.addDecoration(image_ptr, spv::DecorationNonUniform);
+						add_instruction(elect_block, std::move(chain));
+					}
+
+					auto texel = std::make_unique<spv::Instruction>(builder.getUniqueId(), ptr_atomic_type, spv::OpImageTexelPointer);
+					if (non_uniform)
+						builder.addDecoration(texel->getResultId(), spv::DecorationNonUniform);
+					auto atomic_op = std::make_unique<spv::Instruction>(builder.getUniqueId(), uint_type, spv::OpAtomicOr);
+					texel->addIdOperand(image_ptr);
+					texel->addIdOperand(coord);
+					texel->addIdOperand(builder.makeIntConstant(0));
+					atomic_op->addIdOperand(texel->getResultId());
+					atomic_op->addIdOperand(builder.getAtomicDeviceScopeId());
+					atomic_op->addIdOperand(builder.makeUintConstant(0));
+					atomic_op->addIdOperand(or_op_id);
+					add_instruction(elect_block, std::move(texel));
+					add_instruction(elect_block, std::move(atomic_op));
+					builder.createBranch(elect_merge_block);
+				}
+
+				builder.setBuildPoint(elect_merge_block);
+				builder.createBranch(write_merge_block);
+			}
+
+			builder.setBuildPoint(write_merge_block);
+			builder.createBranch(loop_continue_block);
+
+			builder.setBuildPoint(loop_continue_block);
+			builder.createBranch(body_block);
+		}
+
+		builder.setBuildPoint(loop_merge_block);
+		builder.createBranch(merge_block);
+	}
+
+	builder.setBuildPoint(merge_block);
+	builder.makeReturn(false);
+
+	builder.setBuildPoint(current_build_point);
+	feedback_write_call_ids[key] = func->getId();
 	return func->getId();
 }
 
@@ -3040,6 +3244,8 @@ spv::Id SPIRVModule::Impl::get_helper_call_id(SPIRVModule &module, HelperCall ca
 		return build_coop_mat_fp16_to_fp8(module, aux_ids, aux_ids_count);
 	case HelperCall::CoopMatTransfer:
 		return build_coop_mat_transfer(module, aux_ids, aux_ids_count);
+	case HelperCall::AtomicImageR64Compact:
+		return build_feedback_write(module, aux_ids, aux_ids_count);
 	default:
 		break;
 	}

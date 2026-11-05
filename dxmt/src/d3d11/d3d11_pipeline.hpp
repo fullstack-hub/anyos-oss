@@ -56,6 +56,10 @@ template <> struct hash<MTL_GRAPHICS_PIPELINE_DESC> {
     state.add((size_t)v.DomainShader);
     state.add((size_t)v.GeometryShader);
     state.add((size_t)v.InputLayout);
+    // AnyOS: the stream-output layout selects other shader variants (a
+    // pipeline with and one without it are different pipelines)
+    if (v.SOLayout)
+      state.add((size_t)v.SOLayout);
     /* don't add blend */
     // state.add((size_t)v.BlendState);
     state.add((size_t)v.DepthStencilFormat);
@@ -125,6 +129,7 @@ template <> struct equal_to<MTL_GRAPHICS_PIPELINE_DESC> {
            (x.PixelShader == y.PixelShader) && (x.HullShader == y.HullShader) &&
            (x.DomainShader == y.DomainShader) && 
            (x.GeometryShader == y.GeometryShader) &&
+           (x.SOLayout == y.SOLayout) &&
            (x.InputLayout == y.InputLayout) &&
            (x.DepthStencilFormat == y.DepthStencilFormat) &&
            (x.TopologyClass == y.TopologyClass) &&

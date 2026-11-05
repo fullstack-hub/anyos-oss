@@ -1,0 +1,134 @@
+d3d11: tessellation mesh grid for every patch of a threadgroup
+
+Applies on top of 0015.
+
+The vertex-hull object function runs patch_per_group patches per
+threadgroup, and every patch appends its mesh workloads to one counter
+that sizes the mesh grid.  Two defects made tessellated draws flicker
+from frame to frame (Unigine Heaven 4.0 DX11, tessellation Normal: the
+bridge after the cannon and the dark corridor; tessellation off was
+clean, fullscreen was broken too):
+
+- The grid limit (air.max_mesh_work_groups) was one patch's maximum
+  workload count, while a threadgroup dispatches up to patch_per_group
+  times as many.  Dispatching past the declared limit is undefined.
+  The limit is now max_workload_count * patch_per_group, which the
+  payload's workload array was already sized for.
+- Each patch's first thread cleared the shared counter before adding its
+  own workloads (clearing what other patches had already counted), and
+  the dispatching thread read it with no barrier after the other patches'
+  appends.  The counter is now zeroed once before the barrier that ends
+  the vertex zone, and the dispatch reads it after a barrier every
+  thread reaches.
+
+Both defects are real by construction, but this patch does NOT fix the
+visible Heaven corruption: one clean run by eye was luck.  A frame-diff
+detector (transient A->B->A frames per 20x20 block of the window
+recording) counts 100+ broken frames over the bridge scene with and
+without this patch, on a natural demo run (no key pressed); tessellation
+off and all tessellated draws skipped both count 0 (2026-10-02).
+
+The vertex-hull variant digest takes a constant, so conversions cached
+by an earlier build are not replayed.
+
+--- a/src/airconv/dxbc_converter_ts.cpp
++++ b/src/airconv/dxbc_converter_ts.cpp
+@@ -280,7 +280,12 @@
+ 
+   uint32_t max_workload_count = get_max_potential_workload_count(factor_int, pHullStage);
+ 
+-  func_signature.UseMaxMeshWorkgroupSize(max_workload_count);
++  // AnyOS: every patch of the threadgroup adds its workloads to one mesh grid,
++  // so the grid can hold patch_per_group times one patch's maximum. Declaring
++  // one patch's maximum let the object stage dispatch past its declared limit
++  // (undefined: patches dropped or drawn from stale payload, flickering per
++  // frame -- Unigine Heaven tessellation, 2026-10-02).
++  func_signature.UseMaxMeshWorkgroupSize(max_workload_count * patch_per_group);
+ 
+   constexpr uint32_t size_workload_info = sizeof(TessMeshWorkload);
+ 
+@@ -364,6 +369,20 @@
+   );
+   vertex_out->setAlignment(llvm::Align(4));
+ 
++  // AnyOS: the patches of a threadgroup add their mesh workloads to one
++  // counter. It is zeroed once here, before the barrier that ends the vertex
++  // zone (every thread stores the same 0), not by each patch's first thread:
++  // that cleared other patches' already-counted workloads, and the count was
++  // read before every patch had added to it, so the mesh stage ran stale
++  // workload entries (flickering spikes and flat triangles, Unigine Heaven
++  // instanced tessellation, 2026-10-02).
++  llvm::GlobalVariable *workload_count = new llvm::GlobalVariable(
++      module, types._int, false, llvm::GlobalValue::InternalLinkage, llvm::UndefValue::get(types._int),
++      "workload_count", nullptr, llvm::GlobalValue::NotThreadLocal, (uint32_t)air::AddressSpace::threadgroup
++  );
++  workload_count->setAlignment(llvm::Align(4));
++  builder.CreateStore(builder.getInt32(0), workload_count);
++
+   auto thread_position_in_group = function->getArg(thread_id_idx);
+   auto control_point_id_in_patch = builder.CreateExtractElement(thread_position_in_group, (uint32_t)0);
+   auto patch_offset_in_group = builder.CreateExtractElement(thread_position_in_group, 1);
+@@ -664,15 +683,7 @@
+       }
+     };
+ 
+-    llvm::GlobalVariable *workload_count = new llvm::GlobalVariable(
+-        module, types._int, false, llvm::GlobalValue::InternalLinkage, llvm::UndefValue::get(types._int),
+-        "workload_count", nullptr, llvm::GlobalValue::NotThreadLocal, (uint32_t)air::AddressSpace::threadgroup
+-    );
+-    workload_count->setAlignment(llvm::Align(4));
+ 
+-    // clear value
+-    air.CreateAtomicRMW(llvm::AtomicRMWInst::And, workload_count, builder.getInt32(0));
+-
+     switch (pHullStage->tessellation_domain) {
+     case microsoft::D3D11_SB_TESSELLATOR_DOMAIN_ISOLINE:
+       // AnyOS: line detail is tess factor 0, line density 1.
+@@ -705,9 +716,18 @@
+     }
+     }
+ 
++    builder.CreateBr(real_return);
++    builder.SetInsertPoint(real_return);
++
++    // Every patch has added its workloads: one thread dispatches the meshes.
++    air.CreateBarrier(llvm::air::MemFlags::Threadgroup);
++    auto final_return = llvm::BasicBlock::Create(context, "final_return", function);
+     builder.CreateCondBr(
+-        builder.CreateICmp(llvm::CmpInst::ICMP_EQ, patch_offset_in_group, builder.getInt32(0)), dispatch_mesh,
+-        real_return
++        builder.CreateAnd(
++            builder.CreateICmp(llvm::CmpInst::ICMP_EQ, patch_offset_in_group, builder.getInt32(0)),
++            builder.CreateICmp(llvm::CmpInst::ICMP_EQ, control_point_id_in_patch, builder.getInt32(0))
++        ),
++        dispatch_mesh, final_return
+     );
+ 
+     builder.SetInsertPoint(dispatch_mesh);
+@@ -724,11 +744,10 @@
+         builder.CreateGEP(payload_struct_type, payload, {builder.getInt32(0), builder.getInt32(2)})
+     );
+ 
+-    builder.CreateBr(real_return);
+-    builder.SetInsertPoint(real_return);
++    builder.CreateBr(final_return);
++    builder.SetInsertPoint(final_return);
+   }
+ 
+-  air.CreateBarrier(llvm::air::MemFlags::Threadgroup);
+   builder.CreateRetVoid();
+ 
+   module.getOrInsertNamedMetadata("air.object")->addOperand(function_metadata);
+--- a/src/d3d11/d3d11_shader.cpp
++++ b/src/d3d11/d3d11_shader.cpp
+@@ -247,6 +247,10 @@
+   // shaders change, D3D11_SB_TESSELLATOR_PARTITIONING_POW2 = 2).
+   if (shader->reflection().Tessellator.Partition == 2)
+     h.update(uint32_t(0x4f720015));
++  // AnyOS: 0016 changes every vertex-hull object function (one mesh-grid
++  // limit for all of a threadgroup's patches, the workload counter zeroed
++  // once); conversions cached before it are not replayed.
++  h.update(uint32_t(0x4f720016));
+   auto variant_digest = h.final();
+   std::string func_name = "vshs_" + shader->sha1().string().substr(0, 8) + "_" + variant_digest.string() + "_a" + std::to_string(AIRCONV_VERSION);
+   auto proc = [=](const char *func_name, SM50_SHADER_COMMON_DATA *common) -> sm50_bitcode_t  {

@@ -1,0 +1,46 @@
+dxil-spirv (vkd3d-proton subproject): a later tess factor element is relative to the first
+
+The D3D12 runtime converts fxc shaders to DXIL for the AnyOS UMD, and
+dxilconv declares each tess factor of such a shader as its own one-row
+signature element: the quad domain's inside factors at rows 4 and 5.  The
+first element makes the TessLevelInner builtin; the second got
+semantic_offset = start_row = 5 and wrote TessLevelInner[5], out of bounds,
+leaving the second inside factor unset (a quad patch tessellated its interior
+at level 1: a 16-point Bezier patch came out flat inside).  The offset is now
+relative to the first element of the same factor.
+
+diff --git a/subprojects/dxil-spirv/dxil_converter.cpp b/subprojects/dxil-spirv/dxil_converter.cpp
+index ab0f79f6..a5a334c8 100644
+--- a/subprojects/dxil-spirv/dxil_converter.cpp
++++ b/subprojects/dxil-spirv/dxil_converter.cpp
+@@ -4620,6 +4620,11 @@ bool Converter::Impl::emit_patch_variables()
+ 	    execution_model == spv::ExecutionModelTessellationEvaluation ? spv::StorageClassInput : spv::StorageClassOutput;
+ 
+ 	unsigned num_broken_user_rows = 0;
++	// The signature row the first TessFactor / InsideTessFactor element starts
++	// at: a later element of the same factor (dxilconv declares each factor of
++	// an fxc shader as its own one-row element, the quad domain's inside
++	// factors at rows 4 and 5) is an index relative to it.
++	unsigned tess_factor_base_row[2] = {};
+ 
+ 	for (unsigned i = 0; i < patch_node->getNumOperands(); i++)
+ 	{
+@@ -4657,15 +4662,17 @@ bool Converter::Impl::emit_patch_variables()
+ 		{
+ 			auto builtin = system_value == DXIL::Semantic::TessFactor ?
+ 			               spv::BuiltInTessLevelOuter : spv::BuiltInTessLevelInner;
++			unsigned &base_row = tess_factor_base_row[system_value == DXIL::Semantic::TessFactor ? 0 : 1];
+ 			if (spirv_module.has_builtin_shader_input(builtin))
+ 			{
+ 				meta = {};
+ 				meta.id = spirv_module.get_builtin_shader_input(builtin);
+ 				meta.component_type = actual_element_type;
+-				meta.semantic_offset = start_row;
++				meta.semantic_offset = start_row >= base_row ? start_row - base_row : start_row;
+ 				meta.semantic = system_value;
+ 				continue;
+ 			}
++			base_row = start_row;
+ 		}
+ 
+ 		// Application can emit these in ViewInstancing, in which case it's just an offset.

@@ -2829,7 +2829,7 @@ int main(int argc, const char *argv[])
 
 	if (libexec_rpcds != 0) {
 		ret = rpc_host_list_servers(
-			dyn_SAMBA_LIBEXECDIR, frame, &servers);
+			get_dyn_SAMBA_LIBEXECDIR(), frame, &servers);
 		if (ret != 0) {
 			DBG_ERR("Could not list libexec: %s\n",
 				strerror(ret));

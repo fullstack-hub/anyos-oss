@@ -142,8 +142,10 @@ static const struct vkd3d_format vkd3d_formats[] =
     {DXGI_FORMAT_P010,                  VK_FORMAT_G16_B16R16_2PLANE_420_UNORM, 0,  1, 1,  1, PLANAR, 2, TYPELESS, false, p016_copy_footprints},
     {DXGI_FORMAT_P016,                  VK_FORMAT_G16_B16R16_2PLANE_420_UNORM, 0,  1, 1,  1, PLANAR, 2, TYPELESS, false, p016_copy_footprints},
 
-    {DXGI_FORMAT_SAMPLER_FEEDBACK_MIN_MIP_OPAQUE, VK_FORMAT_R32G32_UINT, 8,  1, 1,  1, COLOR, 1},
-    {DXGI_FORMAT_SAMPLER_FEEDBACK_MIP_REGION_USED_OPAQUE, VK_FORMAT_R32G32_UINT, 8,  1, 1,  1, COLOR, 1},
+    /* AnyOS: two interleaved 32-bit planes per feedback texel (see
+     * d3d12_resource_desc_get_padded_feedback_extent), so only 32-bit image atomics are needed. */
+    {DXGI_FORMAT_SAMPLER_FEEDBACK_MIN_MIP_OPAQUE, VK_FORMAT_R32_UINT, 4,  1, 1,  1, COLOR, 1},
+    {DXGI_FORMAT_SAMPLER_FEEDBACK_MIP_REGION_USED_OPAQUE, VK_FORMAT_R32_UINT, 4,  1, 1,  1, COLOR, 1},
 };
 
 static const struct vkd3d_format_footprint depth_stencil_copy_footprints[] =
@@ -572,12 +574,11 @@ dxgi_format_compatibility_list[] =
     {DXGI_FORMAT_P016,
             {DXGI_FORMAT_R16_UNORM, DXGI_FORMAT_R16_UINT, DXGI_FORMAT_R16G16_UNORM, DXGI_FORMAT_R16G16_UINT}},
 
-    /* Internal implementation detail. We desire 64-bit atomics and R32G32 UAV will trigger that compat
-     * similar to other 64-bit images. */
+    /* Internal implementation detail: the feedback map is accessed through R32_UINT views (AnyOS). */
     {DXGI_FORMAT_SAMPLER_FEEDBACK_MIN_MIP_OPAQUE,
-            {DXGI_FORMAT_R32G32_UINT}},
+            {DXGI_FORMAT_R32_UINT}},
     {DXGI_FORMAT_SAMPLER_FEEDBACK_MIP_REGION_USED_OPAQUE,
-            {DXGI_FORMAT_R32G32_UINT}},
+            {DXGI_FORMAT_R32_UINT}},
 };
 
 void vkd3d_format_compatibility_list_add_format(struct vkd3d_format_compatibility_list *list, VkFormat vk_format)

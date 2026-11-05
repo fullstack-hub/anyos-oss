@@ -1,0 +1,44 @@
+class Talloc < Formula
+  desc "Hierarchical, reference-counted memory pool with destructors"
+  homepage "https://talloc.samba.org/"
+  url "https://www.samba.org/ftp/talloc/talloc-2.5.0.tar.gz"
+  sha256 "912afa237510ae542a7733998eb18a12bcda35ab6729c8e2ddb43e8d0ebab007"
+  license "GPL-3.0-or-later"
+  compatibility_version 1
+
+  livecheck do
+    url "https://www.samba.org/ftp/talloc/"
+    regex(/href=.*?talloc[._-]v?(\d+(?:\.\d+)+)\.t/i)
+  end
+
+  uses_from_macos "python" => :build
+
+  def install
+    system "./configure", "--prefix=#{prefix}",
+                          "--disable-rpath",
+                          "--without-gettext",
+                          "--disable-python"
+    system "make", "install"
+  end
+
+  test do
+    (testpath/"test.c").write <<~C
+      #include <talloc.h>
+      int main()
+      {
+        int ret;
+        TALLOC_CTX *tmp_ctx = talloc_new(NULL);
+        if (tmp_ctx == NULL) {
+          ret = 1;
+          goto done;
+        }
+        ret = 0;
+      done:
+        talloc_free(tmp_ctx);
+        return ret;
+      }
+    C
+    system ENV.cc, "test.c", "-I#{include}", "-L#{lib}", "-ltalloc", "-o", "test"
+    system testpath/"test"
+  end
+end

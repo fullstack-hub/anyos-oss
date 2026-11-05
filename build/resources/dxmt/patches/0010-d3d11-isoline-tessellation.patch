@@ -1,0 +1,258 @@
+d3d11: isoline tessellation
+
+Applies on top of 0009.
+
+The isoline domain had no workload generator and line output was refused
+(UnsupportedTessellationOutputPrimitive).  Each line is now one mesh
+workload: dxmt.generate_workload.isoline.* emits ceil(density) lines
+(density is always integer partitioned, as in the reference tessellator's
+isoline rules) at v = line / lines, each an "inner" edge from (0, v) to
+(1, v) with the line detail factor and the workload's padding byte set so
+the domain location emits only that edge's points;
+dxmt.domain_generate_primitives.line joins them into segments (and the point
+generator skips the absent outer edge for isoline point mode).  Line detail
+is tessellation factor 0, density 1.  The probe's isolines cases match the
+reference tessellator (llvmpipe GL image, the bit-exact D3D12 path); WARP's
+own isoline pictures are wrong.
+
+--- a/src/airconv/shaders/air_tessellation.metal
++++ b/src/airconv/shaders/air_tessellation.metal
+@@ -581,7 +581,76 @@
+       patch_index, out_count, out_buffer, in0, in1, out0, out1, out2, out3
+   );
+ }
++
++// AnyOS: isolines.  One workload per line: its points are the "inner" edge
++// from (0, v) to (1, v) with the line detail factor, flagged by `padding`
++// (get_domain_location_impl then emits only that edge).  Line density is
++// always integer partitioned (the reference tessellator's IsoLine rules):
++// ceil(density) lines at v = line / lines.
++template <partitioning partition>
++void
++gen_workload_isoline_impl(
++    int patch_index, threadgroup int *out_count, object_data int *out_buffer, float detail, float density
++) {
++  if (isnan(detail) || detail <= 0) return;
++  if (isnan(density) || density <= 0) return;
+ 
++  object_data TessMeshWorkload *workloads = (object_data TessMeshWorkload *)out_buffer;
++  fxp32 detailf = regularize_factor<partition>(detail);
++  char detail_i = get_int_factor<partition>(detailf);
++  short lines = (short)clamp(ceil(density), 1.0f, 64.0f);
++  fxp32 densityf = (fxp32)lines << 16;
++  for (short line = 0; line < lines; line++) {
++    fxp16 v = (fxp16)min(place_in_1d<partitioning::integer>(line, densityf) >> 1, (uint)fxp16_1);
++    fxp16v2 left = fxp16v2(fxp16_0, v);
++    fxp16v2 right = fxp16v2(fxp16_1, v);
++    workloads[get_next_index(out_count)] = {
++        left, right, left, right, detailf, 0, detail_i, 0, false, true,
++        0, 0, 0, 0, 0, 0, 0, 0, (short)patch_index
++    };
++  }
++}
++
++void gen_workload_isoline_integer(
++    int patch_index, threadgroup int *out_count, object_data int *out_buffer, float detail, float density
++) asm("dxmt.generate_workload.isoline.integer");
++void
++gen_workload_isoline_integer(
++    int patch_index, threadgroup int *out_count, object_data int *out_buffer, float detail, float density
++) {
++  gen_workload_isoline_impl<partitioning::integer>(patch_index, out_count, out_buffer, detail, density);
++}
++
++void gen_workload_isoline_pow2(
++    int patch_index, threadgroup int *out_count, object_data int *out_buffer, float detail, float density
++) asm("dxmt.generate_workload.isoline.pow2");
++void
++gen_workload_isoline_pow2(
++    int patch_index, threadgroup int *out_count, object_data int *out_buffer, float detail, float density
++) {
++  gen_workload_isoline_impl<partitioning::pow2>(patch_index, out_count, out_buffer, detail, density);
++}
++
++void gen_workload_isoline_odd(
++    int patch_index, threadgroup int *out_count, object_data int *out_buffer, float detail, float density
++) asm("dxmt.generate_workload.isoline.odd");
++void
++gen_workload_isoline_odd(
++    int patch_index, threadgroup int *out_count, object_data int *out_buffer, float detail, float density
++) {
++  gen_workload_isoline_impl<partitioning::fractional_odd>(patch_index, out_count, out_buffer, detail, density);
++}
++
++void gen_workload_isoline_even(
++    int patch_index, threadgroup int *out_count, object_data int *out_buffer, float detail, float density
++) asm("dxmt.generate_workload.isoline.even");
++void
++gen_workload_isoline_even(
++    int patch_index, threadgroup int *out_count, object_data int *out_buffer, float detail, float density
++) {
++  gen_workload_isoline_impl<partitioning::fractional_even>(patch_index, out_count, out_buffer, detail, density);
++}
++
+ struct domain_location {
+   float2 uv;
+   bool active;
+@@ -645,6 +714,8 @@
+   int count = workload.inner_factor_i + workload.outer_factor_i + 2;
+   if (workload.has_complement)
+     count += workload.inner_factor_c_i + workload.outer_factor_c_i + 2;
++  if (workload.padding) // AnyOS: an isoline, its points only
++    count = workload.inner_factor_i + 1;
+ 
+   if (thread_index < count) {
+     ret.active = true;
+@@ -803,7 +874,7 @@
+     for (short i = 0; i < max_in + 1; i++) {
+       mesh.set_index(index_count++, i);
+     }
+-    for (short i = 0; i < max_out + 1; i++) {
++    for (short i = 0; i < max_out + 1 && !workload.padding; i++) { // AnyOS: an isoline has no outer edge
+       mesh.set_index(index_count++, i + base_outer);
+     }
+   }
+@@ -824,3 +895,21 @@
+ 
+   mesh.set_primitive_count(index_count);
+ }
++
++// AnyOS: isoline segments of one line workload.
++using MeshLine = metal::mesh<dummy_vertex, void, 65, 64, topology::line>;
++
++void generatePrimitiveLine(int workload_index, object_data int *data, MeshLine mesh) asm(
++    "dxmt.domain_generate_primitives.line"
++);
++
++void
++generatePrimitiveLine(int workload_index, object_data int *data, MeshLine mesh) {
++  object_data TessMeshWorkload &workload = ((object_data TessMeshWorkload *)data)[workload_index];
++  short segments = workload.inner_factor_i;
++  for (short i = 0; i < segments; i++) {
++    mesh.set_index(i * 2, i);
++    mesh.set_index(i * 2 + 1, i + 1);
++  }
++  mesh.set_primitive_count(segments);
++}
+--- a/src/airconv/dxbc_converter_ts.cpp
++++ b/src/airconv/dxbc_converter_ts.cpp
+@@ -110,8 +110,9 @@
+ 
+   switch (pHullStage->tessellation_domain) {
+   case microsoft::D3D11_SB_TESSELLATOR_DOMAIN_UNDEFINED:
+-  case microsoft::D3D11_SB_TESSELLATOR_DOMAIN_ISOLINE:
+     return 0;
++  case microsoft::D3D11_SB_TESSELLATOR_DOMAIN_ISOLINE:
++    return max_tess_factor; // AnyOS: one workload per line
+   case microsoft::D3D11_SB_TESSELLATOR_DOMAIN_TRI:
+     return std::ceil((max_tess_factor - 1) / 4.0) * 3 + (max_tess_factor & 1);
+   case microsoft::D3D11_SB_TESSELLATOR_DOMAIN_QUAD:
+@@ -674,7 +675,14 @@
+ 
+     switch (pHullStage->tessellation_domain) {
+     case microsoft::D3D11_SB_TESSELLATOR_DOMAIN_ISOLINE:
+-      // TESS TODO
++      // AnyOS: line detail is tess factor 0, line density 1.
++      dxbc.HullGenerateWorkloadForIsoline(
++          patch_offset_in_group, workload_count,
++          builder.CreateGEP(
++              payload_struct_type, payload, {builder.getInt32(0), builder.getInt32(3), builder.getInt32(0)}
++          ),
++          get_partitioning(pHullStage), tess_factors[0], tess_factors[1]
++      );
+       break;
+     case microsoft::D3D11_SB_TESSELLATOR_DOMAIN_QUAD:
+       dxbc.HullGenerateWorkloadForQuad(
+@@ -831,7 +839,7 @@
+     break;
+   }
+   case microsoft::D3D11_SB_TESSELLATOR_OUTPUT_LINE: {
+-    // TESS TODO
++    // AnyOS: one isoline per workload (generatePrimitiveLine).
+     func_signature.DefineInput(
+         air::InputMesh{(uint32_t)max_edge_point, (uint32_t)max_edge_point - 1, air::MeshOutputTopology::Line}
+     );
+--- a/src/airconv/nt/dxbc_converter_base.cpp
++++ b/src/airconv/nt/dxbc_converter_base.cpp
+@@ -2700,6 +2700,54 @@
+   Ops.push_back(TessFactorOut2);
+ 
+   std::string FnName = "dxmt.generate_workload.triangle";
++  switch (Partitioning) {
++  case TessellatorPartitioning::integer:
++    FnName += ".integer";
++    break;
++  case TessellatorPartitioning::pow2:
++    FnName += ".pow2";
++    break;
++  case TessellatorPartitioning::fractional_odd:
++    FnName += ".odd";
++    break;
++  case TessellatorPartitioning::fractional_even:
++    FnName += ".even";
++    break;
++  }
++  auto Fn = air.getModule()->getOrInsertFunction(FnName, llvm::FunctionType::get(air.getVoidTy(), Tys, false), Attrs);
++  ir.CreateCall(Fn, Ops);
++}
++
++// AnyOS: isoline domain -- one workload per line (dxmt.generate_workload.isoline.*).
++void
++Converter::HullGenerateWorkloadForIsoline(
++    llvm::Value *PatchIndex, llvm::Value *CountPtr, llvm::Value *DataPtr, TessellatorPartitioning Partitioning,
++    llvm::Value *TessFactorDetail, llvm::Value *TessFactorDensity
++) {
++  using namespace llvm;
++
++  auto &Context = air.getContext();
++  auto Attrs = AttributeList::get(
++      Context, {{3U, Attribute::get(Context, Attribute::AttrKind::WriteOnly)},
++                {~0U, Attribute::get(Context, Attribute::AttrKind::NoUnwind)},
++                {~0U, Attribute::get(Context, Attribute::AttrKind::WillReturn)}}
++  );
++
++  SmallVector<Value *> Ops;
++  SmallVector<Type *> Tys;
++
++  Tys.push_back(PatchIndex->getType());
++  Ops.push_back(PatchIndex);
++  Tys.push_back(CountPtr->getType());
++  Ops.push_back(CountPtr);
++  Tys.push_back(DataPtr->getType());
++  Ops.push_back(DataPtr);
++  Tys.push_back(TessFactorDetail->getType());
++  Ops.push_back(TessFactorDetail);
++  Tys.push_back(TessFactorDensity->getType());
++  Ops.push_back(TessFactorDensity);
++
++  std::string FnName = "dxmt.generate_workload.isoline";
+   switch (Partitioning) {
+   case TessellatorPartitioning::integer:
+     FnName += ".integer";
+--- a/src/airconv/nt/dxbc_converter_base.hpp
++++ b/src/airconv/nt/dxbc_converter_base.hpp
+@@ -481,6 +481,10 @@
+       llvm::Value *TessFactorIn, llvm::Value *TessFactorOut0, llvm::Value *TessFactorOut1, llvm::Value *TessFactorOut2
+   );
+ 
++  void HullGenerateWorkloadForIsoline(
++      llvm::Value *PatchIndex, llvm::Value *CountPtr, llvm::Value *DataPtr, TessellatorPartitioning Partitioning,
++      llvm::Value *TessFactorDetail, llvm::Value *TessFactorDensity
++  );
+   void HullGenerateWorkloadForQuad(
+       llvm::Value *PatchIndex, llvm::Value *CountPtr, llvm::Value *DataPtr, TessellatorPartitioning Partitioning,
+       llvm::Value *TessFactorIn0, llvm::Value *TessFactorIn1, llvm::Value *TessFactorOut0, llvm::Value *TessFactorOut1,
+--- a/src/d3d11/d3d11_context_impl.cpp
++++ b/src/d3d11/d3d11_context_impl.cpp
+@@ -5045,11 +5045,6 @@
+       return DrawCallStatus::Invalid;
+     }
+     switch (HS->reflection().Tessellator.OutputPrimitive) {
+-    case MTL_TESSELLATOR_OUTPUT_LINE:
+-      EmitST([](ArgumentEncodingContext &enc) {
+-        enc.setCompatibilityFlag(FeatureCompatibility::UnsupportedTessellationOutputPrimitive);
+-      });
+-      return DrawCallStatus::Invalid;
+     default:
+       break;
+     }

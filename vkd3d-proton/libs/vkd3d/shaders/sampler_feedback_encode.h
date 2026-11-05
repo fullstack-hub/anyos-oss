@@ -10,7 +10,20 @@ layout(push_constant, std430) uniform Registers
 	int dst_mip;
 };
 
-layout(set = 0, binding = 0, rg32ui) uniform uimage2DArray Output;
+// AnyOS: two interleaved R32_UINT planes, logical texel (x, y) = (2x, y) + (2x + 1, y).
+layout(set = 0, binding = 0, r32ui) uniform uimage2DArray Output;
+
+uvec2 load_feedback(ivec2 coord, int layer)
+{
+	return uvec2(imageLoad(Output, ivec3(2 * coord.x, coord.y, layer)).x,
+			imageLoad(Output, ivec3(2 * coord.x + 1, coord.y, layer)).x);
+}
+
+void store_feedback(ivec2 coord, int layer, uvec2 value)
+{
+	imageStore(Output, ivec3(2 * coord.x, coord.y, layer), uvec4(value.x));
+	imageStore(Output, ivec3(2 * coord.x + 1, coord.y, layer), uvec4(value.y));
+}
 
 void sampler_feedback_encode_min_mip(ivec2 coord, int layer, uint value)
 {
@@ -26,7 +39,7 @@ void sampler_feedback_encode_min_mip(ivec2 coord, int layer, uint value)
 		value = 0xff;
 
 	uvec2 encoded_value = uvec2(0u, value == 0xff ? 0 : ((value + 1) << 28));
-	imageStore(Output, ivec3(coord + dst_offset, layer), encoded_value.xyxy);
+	store_feedback(coord + dst_offset, layer, encoded_value);
 }
 
 void clear_bit(inout uvec2 v, int bit)
@@ -52,7 +65,7 @@ void set_bit(inout uvec2 v, int bit)
 void sampler_feedback_encode_mip_used(ivec2 coord, int layer, bool accessed)
 {
 	// This gets awkward.
-	uvec2 value = imageLoad(Output, ivec3(coord + dst_offset, layer)).xy;
+	uvec2 value = load_feedback(coord + dst_offset, layer);
 	int bit_offset = dst_mip * 4;
 
 	if (accessed)
@@ -72,30 +85,30 @@ void sampler_feedback_encode_mip_used(ivec2 coord, int layer, bool accessed)
 	if (all(lessThan(coord + 1, resolution)))
 		clear_bit(value, bit_offset + 3);
 
-	imageStore(Output, ivec3(coord + dst_offset, layer), value.xyxy);
+	store_feedback(coord + dst_offset, layer, value);
 
 	if (coord.x > 0 && dst_offset.x > 0)
 	{
 		// Clear out usage from left neighbor.
-		value = imageLoad(Output, ivec3(coord + dst_offset - ivec2(1, 0), layer)).xy;
+		value = load_feedback(coord + dst_offset - ivec2(1, 0), layer);
 		clear_bit(value, bit_offset + 1);
-		imageStore(Output, ivec3(coord + dst_offset - ivec2(1, 0), layer), value.xyxy);
+		store_feedback(coord + dst_offset - ivec2(1, 0), layer, value);
 	}
 
 	if (coord.y > 0 && dst_offset.y > 0)
 	{
 		// Clear out usage from top neighbor.
-		value = imageLoad(Output, ivec3(coord + dst_offset - ivec2(0, 1), layer)).xy;
+		value = load_feedback(coord + dst_offset - ivec2(0, 1), layer);
 		clear_bit(value, bit_offset + 2);
-		imageStore(Output, ivec3(coord + dst_offset - ivec2(0, 1), layer), value.xyxy);
+		store_feedback(coord + dst_offset - ivec2(0, 1), layer, value);
 	}
 
 	if (all(greaterThan(uvec4(coord, dst_offset), uvec4(0))))
 	{
 		// Clear out usage from top-left neighbor.
-		value = imageLoad(Output, ivec3(coord + dst_offset - ivec2(1), layer)).xy;
+		value = load_feedback(coord + dst_offset - ivec2(1), layer);
 		clear_bit(value, bit_offset + 3);
-		imageStore(Output, ivec3(coord + dst_offset - ivec2(1), layer), value.xyxy);
+		store_feedback(coord + dst_offset - ivec2(1), layer, value);
 	}
 }
 

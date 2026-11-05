@@ -1001,8 +1001,7 @@ static bool analyze_dxil_atomic_op(Converter::Impl &impl, const llvm::CallInst *
 			break;
 
 		default:
-			// Feedback, always 64-bit.
-			tracking->has_atomic_64bit = true;
+			// AnyOS: feedback writes are 32-bit atomics on two interleaved planes.
 			break;
 		}
 

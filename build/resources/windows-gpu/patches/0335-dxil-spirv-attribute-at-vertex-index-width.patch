@@ -1,0 +1,52 @@
+dxil-spirv (vkd3d-proton subproject): AttributeAtVertex vertex index at 32 bits
+
+HLSL GetAttributeAtVertex (SM 6.1, DXIL dx.op.attributeAtVertex) passes its
+VertexID as an i8 constant.  emit_load_input_instruction() looked the index
+up without a forced width, and get_id_for_constant() has no 8-bit case, so
+the constant resolved to SPIR-V ID 0 and that 0 was cached in value_map.
+LLVM uniques constants, so the column index of the same access chain (the
+same i8 0/1/2, looked up later with width 32) hit the poisoned cache entry as
+well: every OpAccessChain into the PerVertexKHR input had index ID 0
+(spirv-val "Id is 0"), SPIRV-Cross emitted an undeclared `_0`, and every PSO
+with GetAttributeAtVertex failed with VK_ERROR_INITIALIZATION_FAILED
+(fullstack-hub/anyos#936).  The vertex index is now looked up at 32 bits.
+
+Backport of upstream dxil-spirv 263a8cd54006c85499debd04eb426ddd8a1477b1
+("Force 32-bit width for AttributeAtVertex vertex index", 2026-10-26; code
+hunk only, without its reference shader).  Drop this patch when the
+vkd3d-proton pin includes that commit.  VKD3D_ANYOS_SHADER_REVISION is bumped
+so guests drop pipelines cached with the old SPIR-V.
+
+diff --git a/libs/vkd3d/cache.c b/libs/vkd3d/cache.c
+index 3a77f02..7e63fa5 100644
+--- a/libs/vkd3d/cache.c
++++ b/libs/vkd3d/cache.c
+@@ -27,9 +27,9 @@
+  * a guest kept the old, wrong code across a tools update. Bump this with
+  * every patch that changes compiled shaders. */
+ #if defined(ANYOS_SW_ABI31_REDUCED_PROFILE) && ANYOS_SW_ABI31_REDUCED_PROFILE
+-#define VKD3D_ANYOS_SHADER_REVISION 31 /* private SM6.6 compute and reduced-capability profile */
++#define VKD3D_ANYOS_SHADER_REVISION 32 /* 32: reduced profile with AttributeAtVertex vertex index (dxil-spirv 0335) */
+ #else
+-#define VKD3D_ANYOS_SHADER_REVISION 4 /* 4: integration2 SF, sample positions and real FP32 float controls */
++#define VKD3D_ANYOS_SHADER_REVISION 5 /* 5: AttributeAtVertex vertex index (dxil-spirv 0335) */
+ #endif
+ #define VKD3D_ANYOS_BUILD (vkd3d_build ^ (VKD3D_ANYOS_SHADER_REVISION * UINT64_C(0x9e3779b97f4a7c15)))
+ 
+diff --git a/subprojects/dxil-spirv/opcodes/dxil/dxil_resources.cpp b/subprojects/dxil-spirv/opcodes/dxil/dxil_resources.cpp
+index 082fab1..6b879aa 100644
+--- a/subprojects/dxil-spirv/opcodes/dxil/dxil_resources.cpp
++++ b/subprojects/dxil-spirv/opcodes/dxil/dxil_resources.cpp
+@@ -240,7 +240,11 @@ bool emit_load_input_instruction(Converter::Impl &impl, const llvm::CallInst *in
+ 				op->add_id(builder.makeUintConstant(0));
+ 			}
+ 			else
+-				op->add_id(impl.get_id_for_value(index));
++			{
++				// AttributeAtVertex's VertexID is i8. Without a forced width, i8 constants
++				// have no SPIR-V type and resolve to ID 0, which also poisons value_map.
++				op->add_id(impl.get_id_for_value(index, 32));
++			}
+ 		}
+ 		if (row_index)
+ 			op->add_id(impl.get_id_for_value(instruction->getOperand(2)));

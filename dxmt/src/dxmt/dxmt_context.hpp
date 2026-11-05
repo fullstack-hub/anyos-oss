@@ -103,6 +103,10 @@ struct StreamOutputBinding {
   Rc<Buffer> buffer;
   uint64_t offset;
   Rc<Buffer> counter;
+  /* AnyOS: the buffer's filled size (bytes), set by SOSetTargets with an
+   * offset and advanced on the GPU by domain-shader stream output */
+  Rc<Counter> filled;
+  uint64_t size = 0;
 };
 
 enum class EncoderType {
@@ -492,6 +496,36 @@ public:
     entry.offset = offset;
   }
 
+  void bindStreamOutputFilledSize(unsigned slot, Rc<Counter> &&filled, uint64_t size) {
+    auto &entry = so_[slot];
+    entry.filled = std::move(filled);
+    entry.size = size;
+  }
+
+  StreamOutputBinding &streamOutputBinding(unsigned slot) {
+    return so_[slot];
+  }
+
+  void
+  beginStreamOutputQuery(Rc<StreamOutputQuery> &&query) {
+    so_queries_.push_back(std::move(query));
+  }
+
+  void
+  endStreamOutputQuery(Rc<StreamOutputQuery> &&query) {
+    for (auto it = so_queries_.begin(); it != so_queries_.end(); ++it) {
+      if (it->ptr() == query.ptr()) {
+        so_queries_.erase(it);
+        break;
+      }
+    }
+  }
+
+  std::vector<Rc<StreamOutputQuery>> &
+  streamOutputQueries() {
+    return so_queries_;
+  }
+
   void
   bindVertexBuffer(unsigned slot, unsigned offset, unsigned stride, Rc<Buffer> &&buffer) {
     auto &entry = vbuf_[slot];
@@ -862,6 +896,34 @@ public:
   uint32_t tess_num_output_control_point_element;
   uint32_t tess_threads_per_patch;
 
+  /* AnyOS: tessellation followed by a geometry shader.  The tessellation
+   * pipeline streams the domain shader's output (tess_stream_pso) and the
+   * geometry pipeline draws it (tess_gs_pso); both bind their tables at the
+   * mesh stage, so the last encoded offsets of the domain [0] and geometry
+   * [1] stages' constant buffers [.][0] and argument tables [.][1] are kept
+   * to switch between them inside one draw (~0: not encoded). */
+  WMT::RenderPipelineState tess_stream_pso = {};
+  WMT::RenderPipelineState tess_gs_pso = {};
+  uint64_t tess_gs_mesh_offset[2][2] = {{~0ull, ~0ull}, {~0ull, ~0ull}};
+
+  /* AnyOS: domain shader stream output -- what the tessellation pass of a
+   * stream-output draw streamed, for the so_scan/so_write pass after it. */
+  struct TessStreamOutputPending {
+    AllocatedTempBufferSlice vertices;
+    AllocatedTempBufferSlice indices;
+    AllocatedTempBufferSlice records;
+    WMT::Buffer counters;
+    uint64_t counters_offset;
+    uint32_t patch_count;
+    uint32_t registers;
+    uint32_t record_capacity;
+    uint32_t vertices_per_primitive;
+    bool valid = false;
+  } tess_so_pending;
+  /* RasterizedStream 0: the rasterizing pipeline drawn before the stream
+   * pass (tess_stream_pso) of the same draw */
+  WMT::RenderPipelineState tess_so_raster_pso = {};
+
   EmulatedCommandContext emulated_cmd;
   ClearRenderTargetContext clear_rt_cmd;
   DepthStencilBlitContext blit_depth_stencil_cmd;
@@ -940,6 +1002,7 @@ private:
 
   VisibilityResultOffsetBumpState vro_state_;
   std::vector<Rc<VisibilityResultQuery>> pending_queries_;
+  std::vector<Rc<StreamOutputQuery>> so_queries_; // AnyOS: active SO statistics queries
   unsigned active_visibility_query_count_ = 0;
   Flags<FeatureCompatibility> compatibility_flag_;
   TimestampQueryState timestamp_state_;

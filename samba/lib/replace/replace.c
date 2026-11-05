@@ -1366,6 +1366,17 @@ int rep_renameat2(int __oldfd, const char *__old, int __newfd,
 		  const char *__new, unsigned int __flags)
 {
 	if (__flags != 0) {
+#if defined(__APPLE__) && defined(RENAME_EXCL)
+		/*
+		 * macOS has no renameat2 but renameatx_np(RENAME_EXCL) is the same
+		 * atomic no-replace rename. Without it, mkdir_internal falls back to
+		 * a mode-0 placeholder that APFS refuses to rename over, leaving
+		 * every directory a client creates with mode 000 (Any OS).
+		 */
+		if (__flags == RENAME_NOREPLACE) {
+			return renameatx_np(__oldfd, __old, __newfd, __new, RENAME_EXCL);
+		}
+#endif
 #ifdef __NR_renameat2
 		int ret;
 
