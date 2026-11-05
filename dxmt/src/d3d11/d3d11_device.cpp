@@ -261,28 +261,6 @@ public:
                                               ppGeometryShader);
   }
 
-  /* AnyOS: the program type in a DXBC container's SHDR/SHEX chunk (4: domain shader) */
-  static bool
-  IsDomainShaderBytecode(const void *pBytecode, SIZE_T Length) {
-    auto bytes = (const uint8_t *)pBytecode;
-    if (!bytes || Length < 32 || memcmp(bytes, "DXBC", 4))
-      return false;
-    uint32_t chunks;
-    memcpy(&chunks, bytes + 28, 4);
-    for (uint32_t i = 0; i < chunks && 32 + i * 4 + 4 <= Length; i++) {
-      uint32_t offset;
-      memcpy(&offset, bytes + 32 + i * 4, 4);
-      if (offset + 12 > Length)
-        return false;
-      if (!memcmp(bytes + offset, "SHDR", 4) || !memcmp(bytes + offset, "SHEX", 4)) {
-        uint32_t version;
-        memcpy(&version, bytes + offset + 8, 4);
-        return ((version >> 16) & 0xffff) == 4;
-      }
-    }
-    return false;
-  }
-
   HRESULT STDMETHODCALLTYPE CreateGeometryShaderWithStreamOutput(
       const void *pShaderBytecode, SIZE_T BytecodeLength,
       const D3D11_SO_DECLARATION_ENTRY *pSODeclaration, UINT NumEntries,
@@ -293,12 +271,7 @@ public:
     if (pClassLinkage != nullptr)
       WARN("Class linkage not supported");
 
-    // AnyOS: a domain shader's output is captured with RasterizedStream 0 as
-    // well (the tessellation pipeline rasterizes and streams, see
-    // FinalizeTessellationRenderPipeline).
-    if (NumEntries > 0 &&
-        (RasterizedStream == D3D11_SO_NO_RASTERIZED_STREAM ||
-         (RasterizedStream == 0 && IsDomainShaderBytecode(pShaderBytecode, BytecodeLength))) &&
+    if (NumEntries > 0 && RasterizedStream == D3D11_SO_NO_RASTERIZED_STREAM &&
         ((char *)pShaderBytecode)[0] == 'D' &&
         ((char *)pShaderBytecode)[1] == 'X' &&
         ((char *)pShaderBytecode)[2] == 'B' &&
@@ -1018,18 +991,6 @@ public:
       *ppQuery = ref(new MTLD3D11DummyQuery<D3D11_QUERY_DATA_PIPELINE_STATISTICS>(this, pQueryDesc));
       return S_OK;
     }
-    case D3D11_QUERY_SO_STATISTICS:
-    case D3D11_QUERY_SO_OVERFLOW_PREDICATE:
-    case D3D11_QUERY_SO_STATISTICS_STREAM0:
-    case D3D11_QUERY_SO_OVERFLOW_PREDICATE_STREAM0:
-    case D3D11_QUERY_SO_STATISTICS_STREAM1:
-    case D3D11_QUERY_SO_OVERFLOW_PREDICATE_STREAM1:
-    case D3D11_QUERY_SO_STATISTICS_STREAM2:
-    case D3D11_QUERY_SO_OVERFLOW_PREDICATE_STREAM2:
-    case D3D11_QUERY_SO_STATISTICS_STREAM3:
-    case D3D11_QUERY_SO_OVERFLOW_PREDICATE_STREAM3:
-      // AnyOS: counted by domain-shader stream output (d3d11_query.cpp)
-      return CreateStreamOutputQuery(this, pQueryDesc, ppQuery);
     default:
       ERR("CreateQuery1: query type not implemented: ", pQueryDesc->Query);
       return E_NOTIMPL;
@@ -1172,17 +1133,6 @@ private:
   std::unique_ptr<MTLD3D11CommandListPoolBase> commandlist_pool_;
   std::unique_ptr<MTLD3D11PipelineCacheBase> pipeline_cache_;
 
-public:
-  /**
-   * AnyOS: commit whatever the immediate context has recorded, for the
-   * owner to wait on before this device's state is torn down.
-   */
-  void FlushImmediateContextForShutdown() {
-    if (context_)
-      context_->Flush();
-  }
-
-private:
   Device& device_;
   /** ensure destructor called first */
   std::unique_ptr<MTLD3D11DeviceContextBase> context_;
@@ -1217,17 +1167,6 @@ public:
   }
 
   ~MTLD3D11DXGIDevice() {
-    // AnyOS: d3d11_device_ (the pipeline cache, the state object caches,
-    // the resources the recorded chunks reference) is destroyed before
-    // `device`, whose command queue keeps encoding and finishing chunks
-    // on its own threads until its own destructor joins them -- a chunk
-    // still being encoded then walked freed state (the encode thread died
-    // in a chunk lambda while DWM re-created its device right after a
-    // 125 MB desktop-sized upload, 2026-09-21).  Commit what is recorded
-    // and wait for every committed chunk to finish first.
-    d3d11_device_.FlushImmediateContextForShutdown();
-    if (auto committed = cmd_queue_.CurrentSeqId(); committed > 0)
-      cmd_queue_.WaitCPUFence(committed - 1);
     if (local_kmt_) {
       D3DKMT_DESTROYDEVICE destroy = {};
       destroy.hDevice = local_kmt_;

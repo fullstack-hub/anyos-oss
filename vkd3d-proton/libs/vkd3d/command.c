@@ -5171,9 +5171,7 @@ static void d3d12_command_list_begin_active_query(struct d3d12_command_list *lis
     if (d3d12_query_type_is_indexed(query->type))
     {
         unsigned int stream = query->type - D3D12_QUERY_TYPE_SO_STATISTICS_STREAM0;
-        /* AnyOS: never call the NULL entry point of a disabled extension. */
-        if (list->device->vk_info.EXT_transform_feedback)
-            VK_CALL(vkCmdBeginQueryIndexedEXT(list->cmd.vk_command_buffer, query->vk_pool, query->vk_index, flags, stream));
+        VK_CALL(vkCmdBeginQueryIndexedEXT(list->cmd.vk_command_buffer, query->vk_pool, query->vk_index, flags, stream));
     }
     else
         VK_CALL(vkCmdBeginQuery(list->cmd.vk_command_buffer, query->vk_pool, query->vk_index, flags));
@@ -5190,8 +5188,7 @@ static void d3d12_command_list_end_active_query(struct d3d12_command_list *list,
     if (d3d12_query_type_is_indexed(query->type))
     {
         unsigned int stream = query->type - D3D12_QUERY_TYPE_SO_STATISTICS_STREAM0;
-        if (list->device->vk_info.EXT_transform_feedback)
-            VK_CALL(vkCmdEndQueryIndexedEXT(list->cmd.vk_command_buffer, query->vk_pool, query->vk_index, stream));
+        VK_CALL(vkCmdEndQueryIndexedEXT(list->cmd.vk_command_buffer, query->vk_pool, query->vk_index, stream));
     }
     else
         VK_CALL(vkCmdEndQuery(list->cmd.vk_command_buffer, query->vk_pool, query->vk_index));
@@ -8541,96 +8538,6 @@ static bool d3d12_command_list_update_raygen_state(struct d3d12_command_list *li
     return true;
 }
 
-static VkSampleCountFlagBits d3d12_command_list_get_sample_locations_count(struct d3d12_command_list *list)
-{
-    /* The bound pipeline (or its sample count variant) rasterizes with the render
-     * target's count, or the PSO's when no target is bound. */
-    if (list->dynamic_state.rasterization_samples)
-        return list->dynamic_state.rasterization_samples;
-    return list->state->graphics.ms_desc.rasterizationSamples;
-}
-
-static void d3d12_command_list_get_single_sample_shift(struct d3d12_command_list *list, float *x, float *y)
-{
-    const struct vkd3d_dynamic_state *dyn_state = &list->dynamic_state;
-
-    *x = *y = 0.0f;
-    if (dyn_state->sample_positions.sample_count != 1 ||
-            d3d12_command_list_get_sample_locations_count(list) != VK_SAMPLE_COUNT_1_BIT)
-        return;
-    /* A 2x2 pattern (tier 2) cannot be a single shift; tier 1 keeps one pixel's. */
-    *x = -(float)dyn_state->sample_positions.positions[0].X / 16.0f;
-    *y = -(float)dyn_state->sample_positions.positions[0].Y / 16.0f;
-}
-
-static void d3d12_command_list_emit_sample_locations(struct d3d12_command_list *list)
-{
-    /* The D3D12 standard patterns, which are also Vulkan's standard locations. */
-    static const D3D12_SAMPLE_POSITION standard_2[] = {{4, 4}, {-4, -4}};
-    static const D3D12_SAMPLE_POSITION standard_4[] = {{-2, -6}, {6, -2}, {-6, 2}, {2, 6}};
-    static const D3D12_SAMPLE_POSITION standard_8[] =
-    {
-        {1, -3}, {-1, 3}, {5, 1}, {-3, -5}, {-5, 5}, {-7, -1}, {3, 7}, {7, -7},
-    };
-    static const D3D12_SAMPLE_POSITION standard_16[] =
-    {
-        {1, 1}, {-1, -3}, {-3, 2}, {4, -1}, {-5, -2}, {2, 5}, {5, 3}, {3, -5},
-        {-2, 6}, {0, -7}, {-4, -6}, {-6, 4}, {-8, 0}, {7, -4}, {6, 7}, {-7, -8},
-    };
-    const struct vkd3d_vk_device_procs *vk_procs = &list->device->vk_procs;
-    struct vkd3d_dynamic_state *dyn_state = &list->dynamic_state;
-    VkSampleLocationEXT locations[ARRAY_SIZE(dyn_state->sample_positions.positions)];
-    const D3D12_SAMPLE_POSITION *positions;
-    VkSampleLocationsInfoEXT info;
-    VkSampleCountFlagBits samples;
-    unsigned int i, count;
-
-    samples = d3d12_command_list_get_sample_locations_count(list);
-
-    memset(&info, 0, sizeof(info));
-    info.sType = VK_STRUCTURE_TYPE_SAMPLE_LOCATIONS_INFO_EXT;
-    info.sampleLocationsPerPixel = samples;
-
-    if (dyn_state->sample_positions.sample_count == samples)
-    {
-        positions = dyn_state->sample_positions.positions;
-        info.sampleLocationGridSize.width = dyn_state->sample_positions.pixel_count == 4 ? 2 : 1;
-        info.sampleLocationGridSize.height = info.sampleLocationGridSize.width;
-    }
-    else
-    {
-        /* Standard pattern, also for draws whose count differs from the programmed one. */
-        if (dyn_state->sample_positions.sample_count)
-            WARN("Sample positions were set for %u samples, drawing with %u.\n",
-                    dyn_state->sample_positions.sample_count, samples);
-        switch (samples)
-        {
-            case VK_SAMPLE_COUNT_2_BIT: positions = standard_2; break;
-            case VK_SAMPLE_COUNT_4_BIT: positions = standard_4; break;
-            case VK_SAMPLE_COUNT_8_BIT: positions = standard_8; break;
-            case VK_SAMPLE_COUNT_16_BIT: positions = standard_16; break;
-            default:
-                ERR("Unexpected sample count %u.\n", samples);
-                return;
-        }
-        info.sampleLocationGridSize.width = 1;
-        info.sampleLocationGridSize.height = 1;
-    }
-
-    /* Both APIs order the pattern pixel by pixel (row-major in the 2x2 quad), then by sample. */
-    count = samples * info.sampleLocationGridSize.width * info.sampleLocationGridSize.height;
-    for (i = 0; i < count; i++)
-    {
-        locations[i].x = (float)(positions[i].X + 8) / 16.0f;
-        locations[i].y = (float)(positions[i].Y + 8) / 16.0f;
-    }
-    info.sampleLocationsCount = count;
-    info.pSampleLocations = locations;
-
-    VK_CALL(vkCmdSetSampleLocationsEXT(list->cmd.vk_command_buffer, &info));
-    dyn_state->sample_positions.emitted_samples = samples;
-}
-
 static void d3d12_command_list_update_dynamic_state(struct d3d12_command_list *list)
 {
     const struct vkd3d_vk_device_procs *vk_procs = &list->device->vk_procs;
@@ -8640,27 +8547,8 @@ static void d3d12_command_list_update_dynamic_state(struct d3d12_command_list *l
     VkDepthBiasInfoEXT depth_bias_info;
     const uint32_t *stride_align_masks;
     struct vkd3d_bitmask_range range;
-    float shift_x, shift_y;
     uint32_t update_vbos;
     unsigned int i;
-
-    /* One sample per pixel: a programmed position is the pixel centre shifted by
-     * (X, Y) / 16, which is the same as rasterizing the primitive shifted by the
-     * opposite amount (Vulkan has no single-sample locations; MoltenVK takes 2x/4x).
-     * Re-emit the viewports whenever that shift changes. */
-    d3d12_command_list_get_single_sample_shift(list, &shift_x, &shift_y);
-    if (shift_x != dyn_state->sample_positions.viewport_shift_x || shift_y != dyn_state->sample_positions.viewport_shift_y)
-    {
-        dyn_state->sample_positions.viewport_shift_x = shift_x;
-        dyn_state->sample_positions.viewport_shift_y = shift_y;
-        dyn_state->dirty_flags |= VKD3D_DYNAMIC_STATE_VIEWPORT;
-    }
-
-    /* Sample locations are given per rasterization sample count: re-emit them when
-     * the bound pipeline renders with a different count than last emitted. */
-    if ((dyn_state->active_flags & VKD3D_DYNAMIC_STATE_SAMPLE_LOCATIONS) &&
-            d3d12_command_list_get_sample_locations_count(list) != dyn_state->sample_positions.emitted_samples)
-        dyn_state->dirty_flags |= VKD3D_DYNAMIC_STATE_SAMPLE_LOCATIONS;
 
     /* Make sure we only update states that are dynamic in the pipeline */
     dyn_state->dirty_flags &= list->dynamic_state.active_flags;
@@ -8669,23 +8557,8 @@ static void d3d12_command_list_update_dynamic_state(struct d3d12_command_list *l
     {
         if (dyn_state->dirty_flags & VKD3D_DYNAMIC_STATE_VIEWPORT)
         {
-            if (dyn_state->sample_positions.viewport_shift_x != 0.0f || dyn_state->sample_positions.viewport_shift_y != 0.0f)
-            {
-                VkViewport shifted[D3D12_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE];
-
-                for (i = 0; i < dyn_state->viewport_count; i++)
-                {
-                    shifted[i] = dyn_state->viewports[i];
-                    shifted[i].x += dyn_state->sample_positions.viewport_shift_x;
-                    shifted[i].y += dyn_state->sample_positions.viewport_shift_y;
-                }
-                VK_CALL(vkCmdSetViewportWithCount(list->cmd.vk_command_buffer, dyn_state->viewport_count, shifted));
-            }
-            else
-            {
-                VK_CALL(vkCmdSetViewportWithCount(list->cmd.vk_command_buffer,
-                        dyn_state->viewport_count, dyn_state->viewports));
-            }
+            VK_CALL(vkCmdSetViewportWithCount(list->cmd.vk_command_buffer,
+                    dyn_state->viewport_count, dyn_state->viewports));
         }
 
         if (dyn_state->dirty_flags & VKD3D_DYNAMIC_STATE_SCISSOR)
@@ -8883,9 +8756,6 @@ static void d3d12_command_list_update_dynamic_state(struct d3d12_command_list *l
 
         VK_CALL(vkCmdSetRasterizationSamplesEXT(list->cmd.vk_command_buffer, rasterization_samples));
     }
-
-    if (dyn_state->dirty_flags & VKD3D_DYNAMIC_STATE_SAMPLE_LOCATIONS)
-        d3d12_command_list_emit_sample_locations(list);
 
     dyn_state->dirty_flags = 0;
 }
@@ -14778,10 +14648,6 @@ static void d3d12_command_list_set_root_signature(struct d3d12_command_list *lis
     if (bindings->root_signature == root_signature)
         return;
 
-    /* A different root signature invalidates all previous root arguments.
-     * In particular, an active raw-VA SRV from the old signature must not
-     * become a uniform-buffer push descriptor in the new signature. */
-    bindings->root_descriptor_active_mask = 0;
     bindings->root_signature = root_signature;
     bindings->static_sampler_set = VK_NULL_HANDLE;
 
@@ -15386,10 +15252,7 @@ static void STDMETHODCALLTYPE d3d12_command_list_SOSetTargets(d3d12_command_list
 
     if (!list->device->vk_info.EXT_transform_feedback)
     {
-        /* Once: the D3D12 runtime clears the SO targets on every command
-         * list reset, and a per-frame message cost ~7 ms a frame whenever
-         * stderr is a console. */
-        FIXME_ONCE("Transform feedback is not supported by Vulkan implementation.\n");
+        FIXME("Transform feedback is not supported by Vulkan implementation.\n");
         return;
     }
 
@@ -15487,10 +15350,7 @@ static void d3d12_command_list_recompute_fb_size(struct d3d12_command_list *list
         list->dynamic_state.rasterization_samples = sample_count;
         list->dynamic_state.dirty_flags |= VKD3D_DYNAMIC_STATE_RASTERIZATION_SAMPLES;
 
-        /* Pipelines with sample locations keep a static count even when the
-         * device could make it dynamic: reselect their sample count variant. */
-        if (!list->device->device_info.extended_dynamic_state3_features.extendedDynamicState3RasterizationSamples ||
-                !(list->dynamic_state.active_flags & VKD3D_DYNAMIC_STATE_RASTERIZATION_SAMPLES))
+        if (!list->device->device_info.extended_dynamic_state3_features.extendedDynamicState3RasterizationSamples)
             d3d12_command_list_invalidate_current_pipeline(list, false);
     }
 }
@@ -19161,47 +19021,8 @@ static void STDMETHODCALLTYPE d3d12_command_list_OMSetDepthBounds(d3d12_command_
 static void STDMETHODCALLTYPE d3d12_command_list_SetSamplePositions(d3d12_command_list_iface *iface,
         UINT sample_count, UINT pixel_count, D3D12_SAMPLE_POSITION *sample_positions)
 {
-    struct d3d12_command_list *list = impl_from_ID3D12GraphicsCommandList(iface);
-    struct vkd3d_dynamic_state *dyn_state = &list->dynamic_state;
-    D3D12_PROGRAMMABLE_SAMPLE_POSITIONS_TIER tier;
-
-    TRACE("iface %p, sample_count %u, pixel_count %u, sample_positions %p.\n",
+    FIXME("iface %p, sample_count %u, pixel_count %u, sample_positions %p stub!\n",
             iface, sample_count, pixel_count, sample_positions);
-
-    tier = list->device->d3d12_caps.options2.ProgrammableSamplePositionsTier;
-    if (tier == D3D12_PROGRAMMABLE_SAMPLE_POSITIONS_TIER_NOT_SUPPORTED)
-    {
-        WARN("Programmable sample positions are not supported, ignoring.\n");
-        return;
-    }
-
-    /* (0, 0) restores the standard pattern. */
-    if (!sample_count || !pixel_count || !sample_positions)
-    {
-        dyn_state->sample_positions.sample_count = 0;
-        dyn_state->sample_positions.pixel_count = 0;
-    }
-    else if ((sample_count != 1 && sample_count != 2 && sample_count != 4 && sample_count != 8 && sample_count != 16) ||
-            (pixel_count != 1 && pixel_count != 4))
-    {
-        WARN("Invalid sample positions: %u samples, %u pixels.\n", sample_count, pixel_count);
-        return;
-    }
-    else
-    {
-        if (pixel_count == 4 && tier < D3D12_PROGRAMMABLE_SAMPLE_POSITIONS_TIER_2)
-        {
-            /* Tier 1 repeats one pixel's pattern; keep the top-left pixel. */
-            WARN("2x2 sample position pattern needs tier 2, using the first pixel's.\n");
-            pixel_count = 1;
-        }
-        dyn_state->sample_positions.sample_count = sample_count;
-        dyn_state->sample_positions.pixel_count = pixel_count;
-        memcpy(dyn_state->sample_positions.positions, sample_positions,
-                sample_count * pixel_count * sizeof(*sample_positions));
-    }
-
-    dyn_state->dirty_flags |= VKD3D_DYNAMIC_STATE_SAMPLE_LOCATIONS;
 }
 
 static bool d3d12_command_list_validate_sampler_feedback_transcode(
@@ -19307,7 +19128,7 @@ static void d3d12_command_list_encode_sampler_feedback(struct d3d12_command_list
 
     memset(&dst_view_desc, 0, sizeof(dst_view_desc));
     dst_view_desc.image = dst->res.vk_image;
-    dst_view_desc.format = vkd3d_get_format(list->device, DXGI_FORMAT_R32_UINT, false);
+    dst_view_desc.format = vkd3d_get_format(list->device, DXGI_FORMAT_R32G32_UINT, false);
     dst_view_desc.view_type = VK_IMAGE_VIEW_TYPE_2D_ARRAY;
     dst_view_desc.aspect_mask = VK_IMAGE_ASPECT_COLOR_BIT;
     dst_view_desc.image_usage = VK_IMAGE_USAGE_STORAGE_BIT;
@@ -19695,7 +19516,7 @@ static void d3d12_command_list_decode_sampler_feedback(struct d3d12_command_list
 
     memset(&src_view_desc, 0, sizeof(src_view_desc));
     src_view_desc.image = src->res.vk_image;
-    src_view_desc.format = vkd3d_get_format(list->device, DXGI_FORMAT_R32_UINT, false);
+    src_view_desc.format = vkd3d_get_format(list->device, DXGI_FORMAT_R32G32_UINT, false);
     src_view_desc.view_type = VK_IMAGE_VIEW_TYPE_2D_ARRAY;
     src_view_desc.aspect_mask = VK_IMAGE_ASPECT_COLOR_BIT;
     src_view_desc.image_usage = VK_IMAGE_USAGE_SAMPLED_BIT;
@@ -25657,12 +25478,7 @@ static bool d3d12_command_queue_needs_staggered_submissions(struct d3d12_command
             /* Enable staggered submission logic if graphics and non-graphics
              * queues are active at the same time. This should only happen on
              * devices with one queue family, or when setting single_queue. */
-            /* MoltenVK's single native queue already orders mixed submissions.
-             * A host wait after every command buffer only prevents CPU encoding
-             * from overlapping GPU execution. Keep priority staggering below and
-             * CPU resolution of cross-queue waits (needs_cpu_waits) unchanged. */
-            if (command_queue->device->device_info.vulkan_1_2_properties.driverID != VK_DRIVER_ID_MOLTENVK &&
-                    q->desc.Type != command_queue->desc.Type &&
+            if (q->desc.Type != command_queue->desc.Type &&
                     (q->desc.Type == D3D12_COMMAND_LIST_TYPE_DIRECT || command_queue->desc.Type == D3D12_COMMAND_LIST_TYPE_DIRECT))
             {
                 ret = true;

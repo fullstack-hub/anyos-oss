@@ -1719,10 +1719,9 @@ bool Converter::Impl::get_uav_image_format(DXIL::ResourceKind resource_kind,
 	if (resource_kind == DXIL::ResourceKind::FeedbackTexture2D ||
 	    resource_kind == DXIL::ResourceKind::FeedbackTexture2DArray)
 	{
-		// AnyOS: the feedback map is two interleaved 32-bit planes (texel 2x holds
-		// mips 0-7, texel 2x+1 mips 8-14 and the encoded MinMip) so that it only
-		// needs 32-bit image atomics. Metal has no 64-bit image atomicOr.
-		format = spv::ImageFormatR32ui;
+		format = spv::ImageFormatR64ui;
+		builder().addExtension("SPV_EXT_shader_image_int64");
+		builder().addCapability(spv::CapabilityInt64ImageEXT);
 		return true;
 	}
 	else if (resource_kind != DXIL::ResourceKind::RawBuffer &&
@@ -1852,8 +1851,8 @@ bool Converter::Impl::emit_uavs(const llvm::MDNode *uavs, const llvm::MDNode *re
 		if (resource_kind == DXIL::ResourceKind::FeedbackTexture2D ||
 		    resource_kind == DXIL::ResourceKind::FeedbackTexture2DArray)
 		{
-			// AnyOS: two 32-bit planes, see get_uav_image_format().
-			actual_component_type = DXIL::ComponentType::U32;
+			// 64-bit atomics make things a bit nicer.
+			actual_component_type = DXIL::ComponentType::U64;
 			effective_component_type = get_effective_typed_resource_type(actual_component_type);
 		}
 		else if (tags && get_constant_metadata(tags, 0) == 0)
@@ -3439,13 +3438,7 @@ bool Converter::Impl::emit_global_heaps()
 		    annotation->resource_kind != DXIL::ResourceKind::StructuredBuffer)
 		{
 			actual_component_type = normalize_component_type(annotation->component_type);
-			if (annotation->resource_kind == DXIL::ResourceKind::FeedbackTexture2D ||
-			    annotation->resource_kind == DXIL::ResourceKind::FeedbackTexture2DArray)
-			{
-				// AnyOS: two 32-bit planes, see get_uav_image_format().
-				actual_component_type = DXIL::ComponentType::U32;
-			}
-			else if (annotation->tracking.has_atomic_64bit)
+			if (annotation->tracking.has_atomic_64bit)
 			{
 				// The component type in DXIL is u32, even if the resource itself is u64 in meta reflection data ...
 				// This is also the case for signed components. Always use R64UI here.
@@ -4627,11 +4620,6 @@ bool Converter::Impl::emit_patch_variables()
 	    execution_model == spv::ExecutionModelTessellationEvaluation ? spv::StorageClassInput : spv::StorageClassOutput;
 
 	unsigned num_broken_user_rows = 0;
-	// The signature row the first TessFactor / InsideTessFactor element starts
-	// at: a later element of the same factor (dxilconv declares each factor of
-	// an fxc shader as its own one-row element, the quad domain's inside
-	// factors at rows 4 and 5) is an index relative to it.
-	unsigned tess_factor_base_row[2] = {};
 
 	for (unsigned i = 0; i < patch_node->getNumOperands(); i++)
 	{
@@ -4669,17 +4657,15 @@ bool Converter::Impl::emit_patch_variables()
 		{
 			auto builtin = system_value == DXIL::Semantic::TessFactor ?
 			               spv::BuiltInTessLevelOuter : spv::BuiltInTessLevelInner;
-			unsigned &base_row = tess_factor_base_row[system_value == DXIL::Semantic::TessFactor ? 0 : 1];
 			if (spirv_module.has_builtin_shader_input(builtin))
 			{
 				meta = {};
 				meta.id = spirv_module.get_builtin_shader_input(builtin);
 				meta.component_type = actual_element_type;
-				meta.semantic_offset = start_row >= base_row ? start_row - base_row : start_row;
+				meta.semantic_offset = start_row;
 				meta.semantic = system_value;
 				continue;
 			}
-			base_row = start_row;
 		}
 
 		// Application can emit these in ViewInstancing, in which case it's just an offset.

@@ -174,10 +174,6 @@ CreateVariantShader(MTLD3D11Device *pDevice, ManagedShader shader,
   h.update(variant.sint_output_reg_mask);
   h.update(variant.dual_source_blending);
   h.update(variant.disable_depth_output);
-  // AnyOS: hashed only when set, so every other pixel shader keeps its name
-  // and cache entry
-  if (variant.gs_primitive_id)
-    h.update(uint32_t(0x4f725049));
   auto variant_digest = h.final();
   std::string func_name = "ps_" + shader->sha1().string().substr(0, 8) + "_" + variant_digest.string() + "_a" + std::to_string(AIRCONV_VERSION);
 
@@ -191,7 +187,6 @@ CreateVariantShader(MTLD3D11Device *pDevice, ManagedShader shader,
     data.unorm_output_reg_mask = variant.unorm_output_reg_mask;
     data.uint_output_reg_mask = variant.uint_output_reg_mask;
     data.sint_output_reg_mask = variant.sint_output_reg_mask;
-    data.gs_primitive_id = variant.gs_primitive_id;
 
     sm50_bitcode_t compile_result = nullptr;
     sm50_error_t sm50_err = nullptr;
@@ -242,22 +237,6 @@ CreateVariantShader(MTLD3D11Device *pDevice, ManagedShader shader,
   h.update(variant.max_potential_tess_factor);
   if (variant.input_layout_handle)
     h.update(variant.input_layout_handle->sha1());
-  // AnyOS: pow2 partitioning places points like integer partitioning since
-  // 0015; conversions cached before it are not replayed (only pow2 hull
-  // shaders change, D3D11_SB_TESSELLATOR_PARTITIONING_POW2 = 2).
-  if (shader->reflection().Tessellator.Partition == 2)
-    h.update(uint32_t(0x4f720015));
-  // AnyOS: 0016 changes every vertex-hull object function (one mesh-grid
-  // limit for all of a threadgroup's patches, the workload counter zeroed
-  // once); conversions cached before it are not replayed.
-  h.update(uint32_t(0x4f720016));
-  // AnyOS: 0018 adds the mesh workload group table to the payload of every
-  // vertex-hull object function; hull variants of streaming pipelines differ.
-  h.update(uint32_t(0x4f720030));
-  if (variant.stream)
-    h.update(variant.stream);
-  if (variant.gs_passthrough != ~0u)
-    h.update(variant.gs_passthrough);
   auto variant_digest = h.final();
   std::string func_name = "vshs_" + shader->sha1().string().substr(0, 8) + "_" + variant_digest.string() + "_a" + std::to_string(AIRCONV_VERSION);
   auto proc = [=](const char *func_name, SM50_SHADER_COMMON_DATA *common) -> sm50_bitcode_t  {
@@ -278,19 +257,6 @@ CreateVariantShader(MTLD3D11Device *pDevice, ManagedShader shader,
     pso_tess.type = SM50_SHADER_PSO_TESSELLATOR;
     pso_tess.next = common;
     pso_tess.max_potential_tess_factor = variant.max_potential_tess_factor;
-    SM50_SHADER_TESSELLATION_STREAM_DATA stream;
-    stream.type = SM50_SHADER_TESSELLATION_STREAM;
-    stream.next = common;
-    if (variant.stream)
-      pso_tess.next = &stream;
-    // AnyOS: the pass-through geometry shader's primitive attributes decide
-    // mesh workload grouping in both stages.
-    SM50_SHADER_GS_PASS_THROUGH_DATA gs_passthrough;
-    gs_passthrough.type = SM50_SHADER_GS_PASS_THROUGH;
-    gs_passthrough.DataEncoded = variant.gs_passthrough;
-    gs_passthrough.RasterizationDisabled = false;
-    gs_passthrough.next = pso_tess.next;
-    pso_tess.next = &gs_passthrough;
 
     sm50_bitcode_t compile_result = nullptr;
     sm50_error_t sm50_err = nullptr;
@@ -318,38 +284,17 @@ CreateVariantShader(MTLD3D11Device *pDevice, ManagedShader shader,
   h.update(variant.gs_passthrough);
   h.update(variant.rasterization_disabled);
   h.update(variant.max_potential_tess_factor);
-  h.update(variant.stream_to_geometry);
-  // AnyOS: hashed only when set, so every other domain variant keeps its digest
-  if (variant.stream_output)
-    h.update(variant.stream_output);
-  // AnyOS: 0017 sets the SM50_SHADER_GS_PASS_THROUGH tag the domain variant's
-  // compilation chain was walked without; conversions cached before it are not
-  // replayed.
-  h.update(uint32_t(0x4f720031));
   auto variant_digest = h.final();
   std::string func_name = "ds_" + shader->sha1().string().substr(0, 8) + "_" + variant_digest.string() + "_a" + std::to_string(AIRCONV_VERSION);
   auto proc = [=](const char *func_name, SM50_SHADER_COMMON_DATA *common) -> sm50_bitcode_t  {
     SM50_SHADER_GS_PASS_THROUGH_DATA gs_passthrough;
     SM50_SHADER_PSO_TESSELLATOR_DATA pso_tess;
-    // AnyOS: the tag was never set, so the argument chain was walked from an
-    // uninitialised type (whatever matched was taken for that node).
-    gs_passthrough.type = SM50_SHADER_GS_PASS_THROUGH;
     gs_passthrough.DataEncoded = variant.gs_passthrough;
     gs_passthrough.RasterizationDisabled = variant.rasterization_disabled;
     gs_passthrough.next = &pso_tess;
     pso_tess.type = SM50_SHADER_PSO_TESSELLATOR;
     pso_tess.next = common;
     pso_tess.max_potential_tess_factor = variant.max_potential_tess_factor;
-    SM50_SHADER_TESSELLATION_STREAM_DATA stream;
-    stream.type = SM50_SHADER_TESSELLATION_STREAM;
-    stream.next = common;
-    if (variant.stream_to_geometry || variant.stream_output)
-      pso_tess.next = &stream;
-    SM50_SHADER_TESSELLATION_STREAM_OUTPUT_DATA stream_output;
-    stream_output.type = SM50_SHADER_TESSELLATION_STREAM_OUTPUT;
-    stream_output.next = common;
-    if (variant.stream_output)
-      stream.next = &stream_output;
 
     sm50_bitcode_t compile_result = nullptr;
     sm50_error_t sm50_err = nullptr;
@@ -426,7 +371,6 @@ CreateVariantShader(MTLD3D11Device *pDevice, ManagedShader shader,
   h.update(variant.geometry_shader_handle->sha1());
   h.update(variant.index_buffer_format);
   h.update(variant.strip_topology);
-  h.update(variant.tessellation_stream);
   if (variant.input_layout_handle)
     h.update(variant.input_layout_handle->sha1());
   auto variant_digest = h.final();
@@ -451,11 +395,6 @@ CreateVariantShader(MTLD3D11Device *pDevice, ManagedShader shader,
     geometry.type = SM50_SHADER_PSO_GEOMETRY_SHADER;
     geometry.next = &ia_layout;
     geometry.strip_topology = variant.strip_topology;
-    SM50_SHADER_TESSELLATION_STREAM_DATA stream;
-    stream.type = SM50_SHADER_TESSELLATION_STREAM;
-    stream.next = common;
-    if (variant.tessellation_stream)
-      ia_layout.next = &stream;
 
     sm50_bitcode_t compile_result = nullptr;
     sm50_error_t sm50_err = nullptr;
@@ -481,9 +420,6 @@ CreateVariantShader(MTLD3D11Device *pDevice, ManagedShader shader,
   h.update(getGlobalShaderFlag());
   h.update(variant.vertex_shader_handle->sha1());
   h.update(variant.strip_topology);
-  // AnyOS: geometry shaders writing SV_PrimitiveID convert differently
-  // (0013); keep cached conversions of the earlier build out of reach
-  h.update(uint32_t(0x4f725049));
   auto variant_digest = h.final();
   std::string func_name = "gs_" + shader->sha1().string().substr(0, 8) + "_" + variant_digest.string() + "_a" + std::to_string(AIRCONV_VERSION);
   auto proc = [=](const char *func_name, SM50_SHADER_COMMON_DATA *common) -> sm50_bitcode_t  {

@@ -195,50 +195,6 @@ public:
  * TODO: rename the whole file to dxmt_query.hpp
  */
 
-/**
- * AnyOS: D3D11 stream-output statistics.  Every domain-shader stream-output
- * draw (so_scan) adds the primitives it wrote and needed to each active
- * query's two counters; the CPU reads them once the event after End has been
- * signaled.
- */
-class StreamOutputQuery {
-public:
-  StreamOutputQuery(WMT::Device device) {
-    info_.options = WMTResourceHazardTrackingModeUntracked;
-    info_.memory.set(nullptr);
-    info_.length = 16;
-    buffer_ = device.newBuffer(info_);
-    if (auto values = (uint32_t *)info_.memory.get())
-      values[0] = values[1] = values[2] = values[3] = 0;
-  }
-
-  void
-  incRef() {
-    refcount_.fetch_add(1u, std::memory_order_acquire);
-  }
-  void
-  decRef() {
-    if (refcount_.fetch_sub(1u, std::memory_order_release) == 1u)
-      delete this;
-  }
-
-  WMT::Buffer
-  buffer() {
-    return buffer_;
-  }
-
-  /* [0] primitives written, [1] primitives needed */
-  const volatile uint32_t *
-  values() {
-    return (const volatile uint32_t *)info_.memory.get();
-  }
-
-private:
-  WMTBufferInfo info_;
-  WMT::Reference<WMT::Buffer> buffer_;
-  std::atomic<uint32_t> refcount_ = {0u};
-};
-
 class TimestampQuery {
 public:
   void
