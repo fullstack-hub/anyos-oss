@@ -240,7 +240,11 @@ bool emit_load_input_instruction(Converter::Impl &impl, const llvm::CallInst *in
 				op->add_id(builder.makeUintConstant(0));
 			}
 			else
-				op->add_id(impl.get_id_for_value(index));
+			{
+				// AttributeAtVertex's VertexID is i8. Without a forced width, i8 constants
+				// have no SPIR-V type and resolve to ID 0, which also poisons value_map.
+				op->add_id(impl.get_id_for_value(index, 32));
+			}
 		}
 		if (row_index)
 			op->add_id(impl.get_id_for_value(instruction->getOperand(2)));
@@ -1200,6 +1204,7 @@ static bool build_load_resource_handle(Converter::Impl &impl, spv::Id base_resou
 
 		impl.add(op);
 		resource_id = op->id;
+		impl.resource_access_chain_base[op->id] = { base_resource_id, offset_id };
 	}
 
 	if (ptr_id)

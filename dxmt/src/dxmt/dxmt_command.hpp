@@ -174,6 +174,35 @@ public:
     encoder.setVertexBuffer({}, 0, kCustomBufferArgumentIndex0);
   }
 
+  /* AnyOS: domain shader stream output -- so_scan then so_write over what the
+   * tessellation pass streamed (dxmt_command_constants.hpp).  A buffer left
+   * empty is replaced by `state` (never accessed: slot_mask/query_count). */
+  struct StreamOutputPass {
+    DXMTStreamOutputDraw params;
+    const void *elements;
+    uint32_t element_bytes;
+    WMT::Buffer patch_offsets;
+    uint64_t patch_offsets_offset;
+    WMT::Buffer records;
+    uint64_t records_offset;
+    WMT::Buffer counters;
+    uint64_t counters_offset;
+    WMT::Buffer state;
+    uint64_t state_offset;
+    WMT::Buffer vertices;
+    uint64_t vertices_offset;
+    WMT::Buffer indices;
+    uint64_t indices_offset;
+    WMT::Buffer filled[4];
+    uint64_t filled_offset[4];
+    WMT::Buffer targets[4];
+    uint64_t targets_offset[4];
+    WMT::Buffer queries[4];
+    uint64_t queries_offset[4];
+  };
+
+  void StreamOutput(const StreamOutputPass &pass);
+
 private:
   void setComputePipelineState(WMT::ComputePipelineState state, const WMTSize &threadgroup_size);
 
@@ -199,6 +228,8 @@ private:
   WMT::Reference<WMT::ComputePipelineState> clear_texture_2d_array_float_pipeline;
   WMT::Reference<WMT::ComputePipelineState> clear_texture_3d_float_pipeline;
   WMT::Reference<WMT::ComputePipelineState> clear_texture_buffer_float_pipeline;
+  WMT::Reference<WMT::ComputePipelineState> so_scan_pipeline;
+  WMT::Reference<WMT::ComputePipelineState> so_write_pipeline;
 
   WMT::Reference<WMT::RenderPipelineState> gs_draw_arguments_marshal;
   WMT::Reference<WMT::RenderPipelineState> ts_draw_arguments_marshal;

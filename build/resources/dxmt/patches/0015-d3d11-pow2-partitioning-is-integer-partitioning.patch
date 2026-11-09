@@ -1,0 +1,50 @@
+d3d11: pow2 partitioning is integer partitioning in the tessellator
+
+Applies on top of 0014.
+
+The tessellator rounded every pow2 factor up to a power of two.  WARP's
+pow2 output is byte-identical to its integer output (d3d11-so-probe:
+triangles with factors 1..6, quads 1..5): the fixed-function tessellator
+places pow2 points like integer partitioning, and rounding to a power of
+two is left to the hull shader (the ProcessTessFactors helpers).  With the
+rounding, every non-power-of-two pow2 factor was tessellated denser than
+on Windows (tri-pow2 150 primitives, WARP 97; quad-pow2 47, WARP 38),
+which images of flat patches did not show.
+
+The tessellation vertex-hull variant digest of pow2 hull shaders takes a
+constant, so conversions cached by an earlier build are not replayed;
+every other partitioning keeps its cache entries.
+
+--- a/src/airconv/shaders/air_tessellation.metal
++++ b/src/airconv/shaders/air_tessellation.metal
+@@ -107,9 +107,13 @@
+ template <>
+ fxp32
+ regularize_factor<partitioning::pow2>(float factor) {
+-  // For pow2 partitioning, TessFactor range is [1,2,4,8,16,32,64].
+-  uint clamped = clamp(ceil(factor), 1.0f, 64.0f);
+-  return (clamped == 1 ? 1 : 1 << (32 - clz(clamped - 1))) << 16;
++  // AnyOS: the fixed-function tessellator treats pow2 partitioning as
++  // integer partitioning (WARP's pow2 output is byte-identical to its
++  // integer output for factors 1..6); rounding a factor up to a power of two
++  // is the hull shader's business (the ProcessTessFactors helpers), not the
++  // tessellator's.  Rounding here as well made every non-power-of-two factor
++  // denser than on Windows (d3d11-so-probe tri-pow2: 150 primitives, WARP 97).
++  return ((uint)clamp(ceil(factor), 1.0f, 64.0f)) << 16;
+ }
+ 
+ template <>
+--- a/src/d3d11/d3d11_shader.cpp
++++ b/src/d3d11/d3d11_shader.cpp
+@@ -242,6 +242,11 @@
+   h.update(variant.max_potential_tess_factor);
+   if (variant.input_layout_handle)
+     h.update(variant.input_layout_handle->sha1());
++  // AnyOS: pow2 partitioning places points like integer partitioning since
++  // 0015; conversions cached before it are not replayed (only pow2 hull
++  // shaders change, D3D11_SB_TESSELLATOR_PARTITIONING_POW2 = 2).
++  if (shader->reflection().Tessellator.Partition == 2)
++    h.update(uint32_t(0x4f720015));
+   auto variant_digest = h.final();
+   std::string func_name = "vshs_" + shader->sha1().string().substr(0, 8) + "_" + variant_digest.string() + "_a" + std::to_string(AIRCONV_VERSION);
+   auto proc = [=](const char *func_name, SM50_SHADER_COMMON_DATA *common) -> sm50_bitcode_t  {
