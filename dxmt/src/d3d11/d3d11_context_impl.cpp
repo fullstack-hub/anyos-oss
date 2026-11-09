@@ -1223,26 +1223,9 @@ public:
       if (auto staging = GetStagingResource(pDstResource, DstSubresource); unlikely(staging)) {
         // Per MSDN: The CPU copies data from memory to a subresource created in non-mappable memory.
         // Also MSDN: A resource cannot be used as a destination if: the resource is created with immutable or
-        // dynamic usage. Staging is therefore a legal destination, and apps do use it (fill a staging buffer
-        // with UpdateSubresource, then CopyResource it). The staging allocation is host-visible, but a GPU
-        // copy into it may still be queued (CopyResource, then UpdateSubresource, then Map is a valid
-        // sequence), so the bytes go through an upload buffer and a blit on the command stream like every
-        // other staging write instead of a direct CPU store that the queued copy would then overwrite.
-        auto [staging_buffer, offset] = AllocateStagingBuffer(copy_len, 16);
-        staging_buffer.updateContents(offset, pSrcData, copy_len);
-        SwitchToBlitEncoder(CommandBufferState::ReadbackBlitEncoderActive);
-        UseCopyDestination(staging);
-        EmitOP([staging_buffer, offset, dst_ = std::move(staging), copy_offset, copy_len](ArgumentEncodingContext &enc) {
-          auto [dst_buffer, dst_offset] = enc.access(dst_->buffer(), copy_offset, copy_len, ResourceAccess::Write);
-          auto &cmd = enc.encodeBlitCommand<wmtcmd_blit_copy_from_buffer_to_buffer>();
-          cmd.type = WMTBlitCommandCopyFromBufferToBuffer;
-          cmd.copy_length = copy_len;
-          cmd.src = staging_buffer;
-          cmd.src_offset = offset;
-          cmd.dst = dst_buffer->buffer();
-          cmd.dst_offset = copy_offset + dst_offset;
-        });
-        promote_flush = true;
+        // dynamic usage.
+        // So it's legal?
+        UNIMPLEMENTED("update buffer: staging");
       } else if (auto bindable = GetResourceCommon(pDstResource)) {
         auto [staging_buffer, offset] = AllocateStagingBuffer(copy_len, 16);
         staging_buffer.updateContents(offset, pSrcData, copy_len);
@@ -1456,266 +1439,6 @@ public:
     });
   }
 
-  /* AnyOS: tessellation followed by a geometry shader.  The tessellation
-   * pipeline (rasterization off) streams the domain shader's vertices and an
-   * indexed primitive list into temporary buffers and counts them into
-   * indexed draw and mesh dispatch arguments (counters in the argument
-   * buffer, see air_tessellation.metal); after a mesh -> object barrier the
-   * geometry pipeline draws them with the indirect geometry draw. */
-  struct TessStreamInfo {
-    bool active = false;
-    uint64_t counters_offset = 0;
-    uint32_t factor = 0;
-    uint32_t registers = 0;
-    uint32_t per_warp = 0;
-  };
-
-  struct TessStreamBuffers {
-    AllocatedTempBufferSlice vertices;
-    AllocatedTempBufferSlice indices;
-  };
-
-  TessStreamInfo
-  PrepareTessellationStream() {
-    TessStreamInfo info;
-    if (!tess_gs_active_)
-      return info;
-    auto HS = GetManagedShader<PipelineStage::Hull>();
-    auto DS = GetManagedShader<PipelineStage::Domain>();
-    info.active = true;
-    info.counters_offset = PreAllocateArgumentBuffer(64, 32);
-    info.factor = std::max<uint32_t>(DS->reflection().PostTessellator.MaxPotentialTessFactor, 1);
-    info.registers = std::max<uint32_t>(DS->reflection().NumOutputElement, 1);
-    // vertices per object threadgroup of the geometry draw (point, line and triangle lists)
-    info.per_warp = HS->reflection().Tessellator.OutputPrimitive == MTL_TESSELLATOR_OUTPUT_POINT  ? 32
-                    : HS->reflection().Tessellator.OutputPrimitive == MTL_TESSELLATOR_OUTPUT_LINE ? 32
-                                                                                                   : 30;
-    return info;
-  }
-
-  static TessStreamBuffers
-  TessellationStreamBegin(ArgumentEncodingContext &enc, const TessStreamInfo &info, uint64_t patches) {
-    // Worst case per patch: (factor + 4) workloads of at most 4 (factor + 2)
-    // vertices and 4 (factor + 1) triangles; capped at 128 MiB each (the
-    // domain shader drops what does not fit).
-    uint64_t f = info.factor;
-    uint64_t vertices = std::min<uint64_t>(patches * (f + 4) * 4 * (f + 2), (128ull << 20) / (16 * info.registers));
-    uint64_t indices = std::min<uint64_t>(patches * (f + 4) * 12 * (f + 1), (128ull << 20) / 4);
-    TessStreamBuffers b;
-    b.vertices = enc.allocateTempBuffer1(std::max<uint64_t>(vertices, 1) * 16 * info.registers, 16);
-    b.indices = enc.allocateTempBuffer1(std::max<uint64_t>(indices, 1) * 4, 16);
-    uint32_t *c = enc.getMappedArgumentBuffer<uint32_t>(info.counters_offset);
-    uint32_t init[12] = {0, 1, 0, 0, 0, 0, (uint32_t)vertices, (uint32_t)indices, 0, 1, 1, info.per_warp};
-    memcpy(c, init, sizeof(init));
-    auto argbuf = enc.getFinalArgumentBuffer();
-    auto counters = enc.getFinalArgumentBufferOffset(info.counters_offset);
-    auto set_buffer = [&](WMTRenderCommandType type, WMT::Buffer buffer, uint64_t offset, uint8_t index) {
-      auto &cmd = enc.encodeRenderCommand<wmtcmd_render_setbuffer>();
-      cmd.type = type;
-      cmd.buffer = buffer;
-      cmd.offset = offset;
-      cmd.index = index;
-    };
-    set_buffer(WMTRenderCommandSetMeshBuffer, b.vertices.gpu_buffer, b.vertices.offset, SM50_BINDING_INDEX_TESS_STREAM_VERTEX);
-    set_buffer(WMTRenderCommandSetMeshBuffer, b.indices.gpu_buffer, b.indices.offset, SM50_BINDING_INDEX_TESS_STREAM_INDEX);
-    set_buffer(WMTRenderCommandSetMeshBuffer, argbuf, counters, SM50_BINDING_INDEX_TESS_STREAM_COUNTER);
-    SetTessellationStreamStage(enc, enc.tess_stream_pso, 0);
-    return b;
-  }
-
-  static void
-  SetTessellationStreamStage(ArgumentEncodingContext &enc, WMT::RenderPipelineState pso, unsigned which) {
-    auto &setpso = enc.encodeRenderCommand<wmtcmd_render_setpso>();
-    setpso.type = WMTRenderCommandSetPSO;
-    setpso.pso = pso;
-    const uint8_t index[2] = {SM50_BINDING_INDEX_CONSTANT_BUFFER, SM50_BINDING_INDEX_ARGUMENT_TABLE};
-    for (unsigned i = 0; i < 2; i++) {
-      if (enc.tess_gs_mesh_offset[which][i] == ~0ull)
-        continue;
-      auto &cmd = enc.encodeRenderCommand<wmtcmd_render_setbufferoffset>();
-      cmd.type = WMTRenderCommandSetMeshBufferOffset;
-      cmd.offset = enc.tess_gs_mesh_offset[which][i];
-      cmd.index = index[i];
-    }
-  }
-
-  static void
-  TessellationStreamEnd(ArgumentEncodingContext &enc, const TessStreamInfo &info, const TessStreamBuffers &b) {
-    auto &barrier = enc.encodeRenderCommand<wmtcmd_render_memory_barrier>();
-    barrier.type = WMTRenderCommandMemoryBarrier;
-    barrier.scope = WMTBarrierScopeBuffers;
-    barrier.stages_before = WMTRenderStagePreRaster;
-    barrier.stages_after = WMTRenderStagePreRaster;
-    SetTessellationStreamStage(enc, enc.tess_gs_pso, 1);
-    auto &setbuf = enc.encodeRenderCommand<wmtcmd_render_setbuffer>();
-    setbuf.type = WMTRenderCommandSetObjectBuffer;
-    setbuf.buffer = b.vertices.gpu_buffer;
-    setbuf.offset = b.vertices.offset;
-    setbuf.index = SM50_BINDING_INDEX_TESS_STREAM_VERTEX;
-    auto argbuf = enc.getFinalArgumentBuffer();
-    auto counters = enc.getFinalArgumentBufferOffset(info.counters_offset);
-    auto &cmd = enc.encodeRenderCommand<wmtcmd_render_dxmt_geometry_draw_indexed_indirect>();
-    cmd.type = WMTRenderCommandDXMTGeometryDrawIndexedIndirect;
-    cmd.dispatch_args_buffer = argbuf;
-    cmd.dispatch_args_offset = counters + 32;
-    cmd.vertex_per_warp = info.per_warp;
-    cmd.indirect_args_buffer = argbuf;
-    cmd.indirect_args_offset = counters;
-    cmd.index_buffer = b.indices.gpu_buffer;
-    cmd.index_buffer_offset = b.indices.offset;
-    cmd.imm_draw_arguments = argbuf;
-  }
-
-  /* AnyOS: domain shader stream output.  The tessellation pipeline (compiled
-   * with SM50_SHADER_TESSELLATION_STREAM_OUTPUT, rasterization off) streams
-   * the domain shader's vertices and indices like the geometry-shader path
-   * above, plus one record per workload (patch, first primitive within the
-   * patch, first index, count).  After the draw, a compute pass (so_scan,
-   * so_write in dxmt_command.metal) turns the records into per-patch offsets,
-   * clamps at the bound buffers' capacity in whole primitives, advances their
-   * filled sizes and the active SO_STATISTICS queries, and writes every
-   * primitive's declared components in patch order.  The render pass ends at
-   * such a draw. */
-  struct TessSOInfo {
-    bool active = false;
-    uint64_t counters_offset = 0;
-    uint32_t factor = 0;
-    uint32_t registers = 0;
-    uint32_t vertices_per_primitive = 3;
-  };
-
-  TessSOInfo
-  PrepareTessellationStreamOutput(UINT InstanceCount) {
-    TessSOInfo info;
-    if (!tess_so_active_)
-      return info;
-    if (InstanceCount != 1) {
-      ERR("domain shader stream output: instanced draws are not supported (", InstanceCount, " instances)");
-      return info;
-    }
-    auto HS = GetManagedShader<PipelineStage::Hull>();
-    auto DS = GetManagedShader<PipelineStage::Domain>();
-    info.active = true;
-    info.counters_offset = PreAllocateArgumentBuffer(64, 32);
-    info.factor = std::max<uint32_t>(DS->reflection().PostTessellator.MaxPotentialTessFactor, 1);
-    info.registers = std::max<uint32_t>(DS->reflection().NumOutputElement, 1);
-    auto primitive = HS->reflection().Tessellator.OutputPrimitive;
-    info.vertices_per_primitive = primitive == MTL_TESSELLATOR_OUTPUT_POINT  ? 1
-                                  : primitive == MTL_TESSELLATOR_OUTPUT_LINE ? 2
-                                                                             : 3;
-    return info;
-  }
-
-  static void
-  SetTessellationPSO(ArgumentEncodingContext &enc, WMT::RenderPipelineState pso) {
-    auto &cmd = enc.encodeRenderCommand<wmtcmd_render_setpso>();
-    cmd.type = WMTRenderCommandSetPSO;
-    cmd.pso = pso;
-  }
-
-  static void
-  TessellationStreamOutputBegin(ArgumentEncodingContext &enc, const TessSOInfo &info, uint64_t patches) {
-    // Same worst case as TessellationStreamBegin; (factor + 4) workloads per patch.
-    uint64_t f = info.factor;
-    uint64_t vertices = std::min<uint64_t>(patches * (f + 4) * 4 * (f + 2), (128ull << 20) / (16 * info.registers));
-    uint64_t indices = std::min<uint64_t>(patches * (f + 4) * 12 * (f + 1), (128ull << 20) / 4);
-    uint64_t records = std::min<uint64_t>(patches * (f + 4), (32ull << 20) / 16);
-    auto &p = enc.tess_so_pending;
-    p.vertices = enc.allocateTempBuffer1(std::max<uint64_t>(vertices, 1) * 16 * info.registers, 16);
-    p.indices = enc.allocateTempBuffer1(std::max<uint64_t>(indices, 1) * 4, 16);
-    p.records = enc.allocateTempBuffer1(std::max<uint64_t>(records, 1) * 16, 16);
-    uint32_t *c = enc.getMappedArgumentBuffer<uint32_t>(info.counters_offset);
-    uint32_t init[16] = {0, 1, 0, 0, 0, 0, (uint32_t)vertices, (uint32_t)indices,
-                         0, 1, 1, 32, 0, (uint32_t)records, 0, 0};
-    memcpy(c, init, sizeof(init));
-    p.counters = enc.getFinalArgumentBuffer();
-    p.counters_offset = enc.getFinalArgumentBufferOffset(info.counters_offset);
-    p.patch_count = (uint32_t)patches;
-    p.registers = info.registers;
-    p.record_capacity = (uint32_t)records;
-    p.vertices_per_primitive = info.vertices_per_primitive;
-    p.valid = true;
-    auto set_buffer = [&](WMT::Buffer buffer, uint64_t offset, uint8_t index) {
-      auto &cmd = enc.encodeRenderCommand<wmtcmd_render_setbuffer>();
-      cmd.type = WMTRenderCommandSetMeshBuffer;
-      cmd.buffer = buffer;
-      cmd.offset = offset;
-      cmd.index = index;
-    };
-    set_buffer(p.vertices.gpu_buffer, p.vertices.offset, SM50_BINDING_INDEX_TESS_STREAM_VERTEX);
-    set_buffer(p.indices.gpu_buffer, p.indices.offset, SM50_BINDING_INDEX_TESS_STREAM_INDEX);
-    set_buffer(p.counters, p.counters_offset, SM50_BINDING_INDEX_TESS_STREAM_COUNTER);
-    set_buffer(p.records.gpu_buffer, p.records.offset, SM50_BINDING_INDEX_TESS_STREAM_RECORD);
-    // The stream buffers are not tracked: order this pass after the previous
-    // stream-output writes and the kernels after it through the SO buffers.
-    for (unsigned slot = 0; slot < kStreamOutputSlots; slot++) {
-      auto &b = enc.streamOutputBinding(slot);
-      if (b.buffer.ptr())
-        enc.access<PipelineStage::Vertex>(b.buffer, 0, b.size, ResourceAccess::Write);
-    }
-  }
-
-  void
-  EmitTessellationStreamOutput() {
-    InvalidateCurrentPass();
-    SwitchToComputeEncoder();
-    std::vector<uint32_t> elements = tess_so_elements_;
-    std::array<uint32_t, 4> strides = {tess_so_strides_[0], tess_so_strides_[1], tess_so_strides_[2],
-                                       tess_so_strides_[3]};
-    EmitOP([elements = std::move(elements), strides](ArgumentEncodingContext &enc) {
-      auto &p = enc.tess_so_pending;
-      if (!p.valid)
-        return;
-      p.valid = false;
-      EmulatedCommandContext::StreamOutputPass s{};
-      s.params.patch_count = p.patch_count;
-      s.params.vertices_per_primitive = p.vertices_per_primitive;
-      s.params.registers = p.registers;
-      s.params.record_capacity = p.record_capacity;
-      s.params.element_count = elements.size() / 4;
-      auto state = enc.allocateTempBuffer1(sizeof(DXMTStreamOutputState), 16);
-      auto offsets = enc.allocateTempBuffer1(std::max<uint64_t>(p.patch_count, 1) * 4, 16);
-      s.state = state.gpu_buffer;
-      s.state_offset = state.offset;
-      s.patch_offsets = offsets.gpu_buffer;
-      s.patch_offsets_offset = offsets.offset;
-      s.records = p.records.gpu_buffer;
-      s.records_offset = p.records.offset;
-      s.counters = p.counters;
-      s.counters_offset = p.counters_offset;
-      s.vertices = p.vertices.gpu_buffer;
-      s.vertices_offset = p.vertices.offset;
-      s.indices = p.indices.gpu_buffer;
-      s.indices_offset = p.indices.offset;
-      for (unsigned slot = 0; slot < 4; slot++) {
-        auto &b = enc.streamOutputBinding(slot);
-        if (!b.buffer.ptr() || !b.filled.ptr() || !strides[slot])
-          continue;
-        auto [allocation, offset] = enc.access(b.buffer, 0, b.size, ResourceAccess::Write);
-        s.targets[slot] = allocation->buffer();
-        s.targets_offset[slot] = offset;
-        auto [counter, counter_offset] = enc.access(b.filled);
-        s.filled[slot] = counter->buffer();
-        s.filled_offset[slot] = counter_offset;
-        s.params.slot_mask |= 1u << slot;
-        s.params.buffer_size[slot] = (uint32_t)b.size;
-        s.params.stride[slot] = strides[slot];
-      }
-      for (auto &query : enc.streamOutputQueries()) {
-        if (s.params.query_count == kStreamOutputMaxQueries) {
-          ERR("domain shader stream output: more than ", kStreamOutputMaxQueries, " active SO queries");
-          break;
-        }
-        s.queries[s.params.query_count] = query->buffer();
-        s.queries_offset[s.params.query_count] = 0;
-        s.params.query_count++;
-      }
-      s.elements = elements.data();
-      s.element_bytes = elements.size() * 4;
-      enc.emulated_cmd.StreamOutput(s);
-    });
-  }
-
   void
   TessellationDraw(
       UINT NumControlPoint, UINT VertexCountPerInstance, UINT InstanceCount, UINT StartVertexLocation,
@@ -1723,10 +1446,6 @@ public:
   ) {
     auto draw_arguments_offset = PreAllocateArgumentBuffer(sizeof(DXMT_DRAW_ARGUMENTS), 32);
     auto max_object_threadgroups = max_object_threadgroups_;
-    auto stream = PrepareTessellationStream();
-    auto so = PrepareTessellationStreamOutput(InstanceCount);
-    if (tess_so_active_ && !so.active)
-      return;
     EmitOP([=](ArgumentEncodingContext &enc) {
       DXMT_DRAW_ARGUMENTS *draw_argument = enc.getMappedArgumentBuffer<DXMT_DRAW_ARGUMENTS>(draw_arguments_offset);
       draw_argument->StartVertex = StartVertexLocation;
@@ -1749,32 +1468,14 @@ public:
 
       enc.bumpVisibilityResultOffset();
       enc.resolveRenderPassBarrier();
-      TessStreamBuffers stream_buffers;
-      if (stream.active)
-        stream_buffers = TessellationStreamBegin(enc, stream, (uint64_t)PatchCountPerInstance * InstanceCount);
-      auto encode_draw = [&]() {
-        auto &cmd = enc.encodeRenderCommand<wmtcmd_render_dxmt_tessellation_mesh_draw>();
-        cmd.type = WMTRenderCommandDXMTTessellationMeshDraw;
-        cmd.draw_arguments_offset = enc.getFinalArgumentBufferOffset(draw_arguments_offset);
-        cmd.instance_count = InstanceCount;
-        cmd.threads_per_patch = ThreadsPerPatch;
-        cmd.patch_per_group = PatchPerGroup;
-        cmd.patch_per_mesh_instance = PatchPerObjectInstance;
-      };
-      if (so.active) {
-        if (enc.tess_so_raster_pso) {
-          SetTessellationPSO(enc, enc.tess_so_raster_pso);
-          encode_draw();
-          SetTessellationPSO(enc, enc.tess_stream_pso);
-        }
-        TessellationStreamOutputBegin(enc, so, (uint64_t)PatchCountPerInstance * InstanceCount);
-      }
-      encode_draw();
-      if (stream.active)
-        TessellationStreamEnd(enc, stream, stream_buffers);
+      auto &cmd = enc.encodeRenderCommand<wmtcmd_render_dxmt_tessellation_mesh_draw>();
+      cmd.type = WMTRenderCommandDXMTTessellationMeshDraw;
+      cmd.draw_arguments_offset = enc.getFinalArgumentBufferOffset(draw_arguments_offset);
+      cmd.instance_count = InstanceCount;
+      cmd.threads_per_patch = ThreadsPerPatch;
+      cmd.patch_per_group = PatchPerGroup;
+      cmd.patch_per_mesh_instance = PatchPerObjectInstance;
     });
-    if (so.active)
-      EmitTessellationStreamOutput();
   }
 
   void
@@ -1785,10 +1486,6 @@ public:
     auto IndexBufferOffset = state_.InputAssembler.IndexBufferOffset;
     auto draw_arguments_offset = PreAllocateArgumentBuffer(sizeof(DXMT_DRAW_INDEXED_ARGUMENTS), 32);
     auto max_object_threadgroups = max_object_threadgroups_;
-    auto stream = PrepareTessellationStream();
-    auto so = PrepareTessellationStreamOutput(InstanceCount);
-    if (tess_so_active_ && !so.active)
-      return;
     EmitOP([=](ArgumentEncodingContext &enc) {
       DXMT_DRAW_INDEXED_ARGUMENTS *draw_argument = enc.getMappedArgumentBuffer<DXMT_DRAW_INDEXED_ARGUMENTS>(draw_arguments_offset);
       draw_argument->BaseVertex = BaseVertexLocation;
@@ -1813,34 +1510,16 @@ public:
       auto [index_buffer, index_sub_offset] = enc.currentIndexBuffer();
       enc.bumpVisibilityResultOffset();
       enc.resolveRenderPassBarrier();
-      TessStreamBuffers stream_buffers;
-      if (stream.active)
-        stream_buffers = TessellationStreamBegin(enc, stream, (uint64_t)PatchCountPerInstance * InstanceCount);
-      auto encode_draw = [&]() {
-        auto &cmd = enc.encodeRenderCommand<wmtcmd_render_dxmt_tessellation_mesh_draw_indexed>();
-        cmd.type = WMTRenderCommandDXMTTessellationMeshDrawIndexed;
-        cmd.draw_arguments_offset = enc.getFinalArgumentBufferOffset(draw_arguments_offset);
-        cmd.instance_count = InstanceCount;
-        cmd.threads_per_patch = ThreadsPerPatch;
-        cmd.patch_per_group = PatchPerGroup;
-        cmd.patch_per_mesh_instance = PatchPerObjectInstance;
-        cmd.index_buffer = index_buffer;
-        cmd.index_buffer_offset = IndexBufferOffset + index_sub_offset;
-      };
-      if (so.active) {
-        if (enc.tess_so_raster_pso) {
-          SetTessellationPSO(enc, enc.tess_so_raster_pso);
-          encode_draw();
-          SetTessellationPSO(enc, enc.tess_stream_pso);
-        }
-        TessellationStreamOutputBegin(enc, so, (uint64_t)PatchCountPerInstance * InstanceCount);
-      }
-      encode_draw();
-      if (stream.active)
-        TessellationStreamEnd(enc, stream, stream_buffers);
+      auto &cmd = enc.encodeRenderCommand<wmtcmd_render_dxmt_tessellation_mesh_draw_indexed>();
+      cmd.type = WMTRenderCommandDXMTTessellationMeshDrawIndexed;
+      cmd.draw_arguments_offset = enc.getFinalArgumentBufferOffset(draw_arguments_offset);
+      cmd.instance_count = InstanceCount;
+      cmd.threads_per_patch = ThreadsPerPatch;
+      cmd.patch_per_group = PatchPerGroup;
+      cmd.patch_per_mesh_instance = PatchPerObjectInstance;
+      cmd.index_buffer = index_buffer;
+      cmd.index_buffer_offset = IndexBufferOffset + index_sub_offset;
     });
-    if (so.active)
-      EmitTessellationStreamOutput();
   }
 
   void
@@ -2063,7 +1742,6 @@ public:
   TessellationDrawIndirect(
     UINT NumControlPoint, ID3D11Buffer *pBufferForArgs, UINT AlignedByteOffsetForArgs
   ) {
-    auto stream = PrepareTessellationStream();
     auto max_object_threadgroups = max_object_threadgroups_;
     if (auto bindable = GetResourceCommon(pBufferForArgs)) {
       EmitOP([=, ArgBuffer = bindable->buffer()](ArgumentEncodingContext &enc) {
@@ -2082,11 +1760,6 @@ public:
             dispatch_arg.gpu_buffer, dispatch_arg.gpu_address,
             dispatch_arg.offset, max_object_threadgroups);
         enc.resolveRenderPassBarrier();
-        TessStreamBuffers stream_buffers;
-        if (stream.active)
-          // Indirect patch counts are only known on the GPU. Reserve the
-          // same bounded stream capacity used by large direct draws.
-          stream_buffers = TessellationStreamBegin(enc, stream, UINT32_MAX);
         auto &cmd = enc.encodeRenderCommand<wmtcmd_render_dxmt_tessellation_mesh_draw_indirect>();
         cmd.type = WMTRenderCommandDXMTTessellationMeshDrawIndirect;
         cmd.dispatch_args_buffer = dispatch_arg.gpu_buffer;
@@ -2096,8 +1769,6 @@ public:
         cmd.indirect_args_buffer = buffer->buffer();
         cmd.indirect_args_offset = buffer_offset + AlignedByteOffsetForArgs;
         cmd.imm_draw_arguments = enc.getFinalArgumentBuffer();
-        if (stream.active)
-          TessellationStreamEnd(enc, stream, stream_buffers);
       });
     }
   }
@@ -2106,7 +1777,6 @@ public:
   TessellationDrawIndexedIndirect(
     UINT NumControlPoint, ID3D11Buffer *pBufferForArgs, UINT AlignedByteOffsetForArgs
   ) {
-    auto stream = PrepareTessellationStream();
     auto IndexBufferOffset = state_.InputAssembler.IndexBufferOffset;
     auto max_object_threadgroups = max_object_threadgroups_;
 
@@ -2128,11 +1798,6 @@ public:
             dispatch_arg.gpu_buffer, dispatch_arg.gpu_address,
             dispatch_arg.offset, max_object_threadgroups);
         enc.resolveRenderPassBarrier();
-        TessStreamBuffers stream_buffers;
-        if (stream.active)
-          // Indirect patch counts are only known on the GPU. Reserve the
-          // same bounded stream capacity used by large direct draws.
-          stream_buffers = TessellationStreamBegin(enc, stream, UINT32_MAX);
         auto &cmd = enc.encodeRenderCommand<wmtcmd_render_dxmt_tessellation_mesh_draw_indexed_indirect>();
         cmd.type = WMTRenderCommandDXMTTessellationMeshDrawIndexedIndirect;
         cmd.dispatch_args_buffer = dispatch_arg.gpu_buffer;
@@ -2144,8 +1809,6 @@ public:
         cmd.index_buffer = index_buffer;
         cmd.index_buffer_offset = IndexBufferOffset + index_sub_offset;
         cmd.imm_draw_arguments = enc.getFinalArgumentBuffer();
-        if (stream.active)
-          TessellationStreamEnd(enc, stream, stream_buffers);
       });
     }
   }
@@ -2590,17 +2253,6 @@ public:
       if (pBuffer && (pBuffer->bindFlags() & D3D11_BIND_STREAM_OUTPUT)) {
         bool replaced = false;
         auto &entry = state_.StreamOutput.Targets.bind(slot, {pBuffer}, replaced);
-        {
-          // AnyOS: an explicit offset is the buffer's new filled size; -1 appends
-          auto offset = pOffsets ? pOffsets[slot] : 0;
-          EmitST([=, filled = pBuffer->soFilledSize(), size = pBuffer->buffer()->length()](
-                     ArgumentEncodingContext &enc
-                 ) mutable {
-            if (offset != ~0u)
-              enc.queue().counter_pool.updateCounter(filled, offset);
-            enc.bindStreamOutputFilledSize(slot, std::move(filled), size);
-          });
-        }
         if (!replaced) {
           auto offset = pOffsets ? pOffsets[slot] : 0;
           if (offset != entry.Offset) {
@@ -4889,53 +4541,8 @@ public:
         cmd_cptex.origin = cmd.DstOrigin;
       });
     } else if (auto staging_dst = GetStagingResource(cmd.pDst, cmd.DstSubresource)) {
-      /* Legal per D3D11 (only IMMUTABLE and DYNAMIC destinations are rejected).
-       * The staging subresource is a linear buffer in the D3D layout that the
-       * staging<->staging copies use: block rows for BC formats, also under BC
-       * emulation (the app data and the staging bytes are both compressed, so
-       * nothing is decompressed here). Rows are packed tightly into an upload
-       * buffer and blitted one by one into the destination pitch, on the
-       * command stream: a readback into this very subresource may still be
-       * queued ahead of the update, and the update has to land after it. */
-      auto bytes_per_depth_slice = cmd.EffectiveRows * cmd.EffectiveBytesPerRow;
-      auto [staging_buffer, offset] = AllocateStagingBuffer(bytes_per_depth_slice * cmd.DstSize.depth, 16);
-      if (cmd.EffectiveBytesPerRow == SrcRowPitch) {
-        for (unsigned depthSlice = 0; depthSlice < cmd.DstSize.depth; depthSlice++) {
-          auto dst_offset = offset + depthSlice * bytes_per_depth_slice;
-          const char *src = ((const char *)pSrcData) + depthSlice * SrcDepthPitch;
-          staging_buffer.updateContents(dst_offset, src, bytes_per_depth_slice);
-        }
-      } else {
-        for (unsigned depthSlice = 0; depthSlice < cmd.DstSize.depth; depthSlice++) {
-          for (unsigned row = 0; row < cmd.EffectiveRows; row++) {
-            auto dst_offset = offset + row * cmd.EffectiveBytesPerRow + depthSlice * bytes_per_depth_slice;
-            const char *src = ((const char *)pSrcData) + row * SrcRowPitch + depthSlice * SrcDepthPitch;
-            staging_buffer.updateContents(dst_offset, src, cmd.EffectiveBytesPerRow);
-          }
-        }
-      }
-      SwitchToBlitEncoder(CommandBufferState::ReadbackBlitEncoderActive);
-      UseCopyDestination(staging_dst);
-      EmitOP([staging_buffer, offset, dst_ = std::move(staging_dst), cmd = std::move(cmd),
-              bytes_per_depth_slice](ArgumentEncodingContext &enc) {
-        auto [dst, dst_sub_offset] = enc.access(dst_->buffer(), 0, dst_->length, ResourceAccess::Write);
-        bool block = cmd.DstFormat.Flag & MTL_DXGI_FORMAT_BC;
-        uint32_t first_row = block ? (cmd.DstOrigin.y >> 2) : cmd.DstOrigin.y;
-        uint32_t column_bytes = (block ? (cmd.DstOrigin.x >> 2) : cmd.DstOrigin.x) * cmd.DstFormat.BytesPerTexel;
-        for (unsigned depthSlice = 0; depthSlice < cmd.DstSize.depth; depthSlice++) {
-          for (unsigned row = 0; row < cmd.EffectiveRows; row++) {
-            auto &cmdcp = enc.encodeBlitCommand<wmtcmd_blit_copy_from_buffer_to_buffer>();
-            cmdcp.type = WMTBlitCommandCopyFromBufferToBuffer;
-            cmdcp.copy_length = cmd.EffectiveBytesPerRow;
-            cmdcp.src = staging_buffer;
-            cmdcp.src_offset = offset + depthSlice * bytes_per_depth_slice + row * cmd.EffectiveBytesPerRow;
-            cmdcp.dst = dst->buffer();
-            cmdcp.dst_offset = dst_sub_offset + (cmd.DstOrigin.z + depthSlice) * dst_->bytesPerImage +
-                               (first_row + row) * dst_->bytesPerRow + column_bytes;
-          }
-        }
-      });
-      promote_flush = true;
+      // staging: ...
+      UNIMPLEMENTED("update texture: staging");
     } else {
       UNREACHABLE
     }
@@ -5176,14 +4783,6 @@ public:
         dsv_info.viewId = state_.OutputMerger.DSV->viewId();
         dsv_info.PixelFormat = state_.OutputMerger.DSV->pixelFormat();
         dsv_info.ReadOnlyFlags =  state_.OutputMerger.DSV->readonlyFlags();
-      } else if (effective_render_target == 0 && !state_.OutputMerger.UAVs.any_bound() &&
-                 state_.StreamOutput.Targets.any_bound()) {
-        // AnyOS: stream output rasterizes nothing and needs no attachment --
-        // an attachmentless pass of the smallest size.
-        render_target_width = 1;
-        render_target_height = 1;
-        sample_count = 1;
-        uav_only = true;
       } else if (effective_render_target == 0) {
         if (!state_.OutputMerger.UAVs.any_bound()) {
           DEBUG("No rendering attachment or uav is bounded");
@@ -5374,48 +4973,39 @@ public:
     Desc.SampleCount = state_.OutputMerger.SampleCount;
   }
 
-  // AnyOS: the object function of a tessellation (or geometry) pipeline pulls
-  // the indices itself, so the index buffer format is part of the compiled
-  // pipeline (ShaderVariantTessellationVertexHull::index_buffer_format,
-  // ShaderVariantGeometryVertex::index_buffer_format).  IASetIndexBuffer and a
-  // Draw/DrawIndexed switch change the format without invalidating the render
-  // pipeline, so a ready pipeline is only reused when it was built for the
-  // format of this draw.  A 16-bit object function fed a 32-bit index buffer
-  // read every odd index as 0 and every even one from the wrong element:
-  // whole patches collapsed onto one vertex (Unigine Heaven, 2026-10-03).
-  template <bool IndexedDraw>
-  SM50_INDEX_BUFFER_FORMAT
-  DrawIndexBufferFormat() {
-    if constexpr (IndexedDraw)
-      return state_.InputAssembler.IndexBufferFormat == DXGI_FORMAT_R32_UINT ? SM50_INDEX_BUFFER_FORMAT_UINT32
-                                                                             : SM50_INDEX_BUFFER_FORMAT_UINT16;
-    else
-      return SM50_INDEX_BUFFER_FORMAT_NONE;
-  }
-
   template <bool IndexedDraw>
   DrawCallStatus
   FinalizeTessellationRenderPipeline() {
-    if (cmdbuf_state == CommandBufferState::TessellationRenderPipelineReady) {
-      if (ready_pipeline_index_format_ == DrawIndexBufferFormat<IndexedDraw>())
-        return DrawCallStatus::Tessellation;
-      InvalidateRenderPipeline();
-    }
+    if (cmdbuf_state == CommandBufferState::TessellationRenderPipelineReady)
+      return DrawCallStatus::Tessellation;
     auto HS = GetManagedShader<PipelineStage::Hull>();
     if (!HS) {
       return DrawCallStatus::Invalid;
     }
     switch (HS->reflection().Tessellator.OutputPrimitive) {
+    case MTL_TESSELLATOR_OUTPUT_LINE:
+      EmitST([](ArgumentEncodingContext &enc) {
+        enc.setCompatibilityFlag(FeatureCompatibility::UnsupportedTessellationOutputPrimitive);
+      });
+      return DrawCallStatus::Invalid;
+    case MTL_TESSELLATOR_OUTPUT_POINT:
+      EmitST([](ArgumentEncodingContext &enc) {
+        enc.setCompatibilityFlag(FeatureCompatibility::UnsupportedTessellationOutputPrimitive);
+      });
+      return DrawCallStatus::Invalid;
     default:
       break;
     }
     if (!state_.ShaderStages[PipelineStage::Domain].Shader) {
       return DrawCallStatus::Invalid;
     }
-    // AnyOS: a geometry shader behind tessellation runs as a second pass over
-    // what the tessellation pipeline streams (TessellationStreamBegin/End).
     auto GS = GetManagedShader<PipelineStage::Geometry>();
-    bool tess_gs = GS && GS->reflection().GeometryShader.GSPassThrough == ~0u;
+    if (GS && GS->reflection().GeometryShader.GSPassThrough == ~0u) {
+      EmitST([](ArgumentEncodingContext &enc) {
+        enc.setCompatibilityFlag(FeatureCompatibility::UnsupportedGeometryTessellationDraw);
+      });
+      return DrawCallStatus::Invalid;
+    }
 
     if (!SwitchToRenderEncoder()) {
       return DrawCallStatus::Invalid;
@@ -5425,40 +5015,12 @@ public:
 
     MTL_GRAPHICS_PIPELINE_DESC pipelineDesc;
     InitializeGraphicsPipelineDesc<IndexedDraw>(pipelineDesc);
-    ready_pipeline_index_format_ = pipelineDesc.IndexBufferFormat;
 
     if (FAILED(device->CreateTessellationMeshPipeline(&pipelineDesc, &pipeline))) {
       return DrawCallStatus::Invalid;
     }
-    MTLCompiledGeometryPipeline *gs_pipeline = nullptr;
-    if (tess_gs)
-      device->CreateGeometryPipeline(&pipelineDesc, &gs_pipeline);
-    tess_gs_active_ = tess_gs;
-    // AnyOS: domain shader stream output (the pipeline streams, see
-    // TessellationStreamOutputBegin)
-    tess_so_active_ = !tess_gs && pipelineDesc.SOLayout;
-    // AnyOS: RasterizedStream 0 -- the same draw also rasterizes, with the
-    // pipeline the draw would have without stream output.
-    MTLCompiledTessellationMeshPipeline *so_raster_pipeline = nullptr;
-    if (tess_so_active_ && pipelineDesc.SOLayout->RasterizedStream() == 0 && pipelineDesc.RasterizationEnabled) {
-      MTL_GRAPHICS_PIPELINE_DESC raster_desc = pipelineDesc;
-      raster_desc.SOLayout = nullptr;
-      if (FAILED(device->CreateTessellationMeshPipeline(&raster_desc, &so_raster_pipeline)))
-        so_raster_pipeline = nullptr;
-    }
-    tess_so_elements_.clear();
-    if (tess_so_active_) {
-      MTL_SHADER_STREAM_OUTPUT_ELEMENT_DESC *elements = nullptr;
-      uint32_t count = pipelineDesc.SOLayout->GetStreamOutputElements(&elements, tess_so_strides_);
-      for (uint32_t i = 0; i < count; i++) {
-        tess_so_elements_.push_back(elements[i].Register);
-        tess_so_elements_.push_back(elements[i].Component);
-        tess_so_elements_.push_back(elements[i].OutputSlot);
-        tess_so_elements_.push_back(elements[i].Offset);
-      }
-    }
 
-    EmitST([pso = std::move(pipeline), gs_pso = gs_pipeline, so_raster_pso = so_raster_pipeline](ArgumentEncodingContext &enc) {
+    EmitST([pso = std::move(pipeline)](ArgumentEncodingContext &enc) {
       auto render_encoder = enc.currentRenderEncoder();
       render_encoder->use_tessellation = 1;
       MTL_COMPILED_TESSELLATION_MESH_PIPELINE GraphicsPipeline{};
@@ -5468,30 +5030,6 @@ public:
       if (!GraphicsPipeline.PipelineState) {
         render_encoder->pipeline_invalid = true;
         return;
-      }
-      enc.tess_stream_pso = {};
-      enc.tess_gs_pso = {};
-      enc.tess_so_raster_pso = {};
-      if (so_raster_pso) {
-        MTL_COMPILED_TESSELLATION_MESH_PIPELINE RasterPipeline{};
-        so_raster_pso->GetPipeline(&RasterPipeline); // may block
-        if (!RasterPipeline.PipelineState) {
-          render_encoder->pipeline_invalid = true;
-          return;
-        }
-        enc.tess_stream_pso = GraphicsPipeline.PipelineState;
-        enc.tess_so_raster_pso = RasterPipeline.PipelineState;
-      }
-      if (gs_pso) {
-        MTL_COMPILED_GRAPHICS_PIPELINE GeometryPipeline{};
-        gs_pso->GetPipeline(&GeometryPipeline); // may block
-        if (!GeometryPipeline.PipelineState) {
-          render_encoder->pipeline_invalid = true;
-          return;
-        }
-        render_encoder->use_geometry = 1;
-        enc.tess_stream_pso = GraphicsPipeline.PipelineState;
-        enc.tess_gs_pso = GeometryPipeline.PipelineState;
       }
       auto &cmd = enc.encodeRenderCommand<wmtcmd_render_setpso>();
       cmd.type = WMTRenderCommandSetPSO;
@@ -5522,11 +5060,8 @@ public:
   template <bool IndexedDraw>
   DrawCallStatus
   FinalizeGeometryRenderPipeline() {
-    if (cmdbuf_state == CommandBufferState::GeometryRenderPipelineReady) {
-      if (ready_pipeline_index_format_ == DrawIndexBufferFormat<IndexedDraw>())
-        return DrawCallStatus::Geometry;
-      InvalidateRenderPipeline();
-    }
+    if (cmdbuf_state == CommandBufferState::GeometryRenderPipelineReady)
+      return DrawCallStatus::Geometry;
     if (!SwitchToRenderEncoder()) {
       return DrawCallStatus::Invalid;
     }
@@ -5535,7 +5070,6 @@ public:
 
     MTL_GRAPHICS_PIPELINE_DESC pipelineDesc;
     InitializeGraphicsPipelineDesc<IndexedDraw>(pipelineDesc);
-    ready_pipeline_index_format_ = pipelineDesc.IndexBufferFormat;
     device->CreateGeometryPipeline(&pipelineDesc, &pipeline);
     EmitST([pso = std::move(pipeline)](ArgumentEncodingContext& enc) {
       auto render_encoder = enc.currentRenderEncoder();
@@ -5721,25 +5255,10 @@ public:
     }
     dirty_state.clrAll();
     if (cmdbuf_state == CommandBufferState::TessellationRenderPipelineReady) {
-      if (tess_gs_active_) {
-        // Both bind at the mesh stage: encode both for every draw, which
-        // switches between their recorded offsets.
-        for (auto stage : {PipelineStage::Domain, PipelineStage::Geometry}) {
-          state_.ShaderStages[stage].ConstantBuffers.set_dirty();
-          state_.ShaderStages[stage].SRVs.set_dirty();
-          state_.ShaderStages[stage].Samplers.set_dirty();
-        }
-        EmitST([](ArgumentEncodingContext &enc) {
-          enc.tess_gs_mesh_offset[0][0] = enc.tess_gs_mesh_offset[0][1] = ~0ull;
-          enc.tess_gs_mesh_offset[1][0] = enc.tess_gs_mesh_offset[1][1] = ~0ull;
-        });
-      }
       UploadShaderStageResourceBinding<PipelineStage::Vertex, PipelineKind::Tessellation>();
       UploadShaderStageResourceBinding<PipelineStage::Pixel, PipelineKind::Tessellation>();
       UploadShaderStageResourceBinding<PipelineStage::Hull, PipelineKind::Tessellation>();
       UploadShaderStageResourceBinding<PipelineStage::Domain, PipelineKind::Tessellation>();
-      if (tess_gs_active_)
-        UploadShaderStageResourceBinding<PipelineStage::Geometry, PipelineKind::Geometry>();
     } else if (cmdbuf_state == CommandBufferState::GeometryRenderPipelineReady) {
       UploadShaderStageResourceBinding<PipelineStage::Vertex, PipelineKind::Geometry>();
       UploadShaderStageResourceBinding<PipelineStage::Pixel, PipelineKind::Geometry>();
@@ -5940,12 +5459,6 @@ protected:
   D3D11UserDefinedAnnotation annotation_;
   MTLD3D11ContextExt<ContextInternalState> ext_;
   uint64_t max_object_threadgroups_;
-  // AnyOS: index buffer format the ready tessellation/geometry pipeline was built for
-  SM50_INDEX_BUFFER_FORMAT ready_pipeline_index_format_ = SM50_INDEX_BUFFER_FORMAT_NONE;
-  bool tess_gs_active_ = false; // AnyOS: the bound tessellation pipeline feeds a geometry shader
-  bool tess_so_active_ = false; // AnyOS: the bound tessellation pipeline feeds stream output
-  std::vector<uint32_t> tess_so_elements_; // (register, component, slot, byte offset) per element
-  uint32_t tess_so_strides_[4] = {};
 
 public:
   MTLD3D11DeviceContextImplBase(MTLD3D11Device *pDevice, ContextInternalState &ctx_state, ContextInternalState::device_mutex_t &mutex) :
