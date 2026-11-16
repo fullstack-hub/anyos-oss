@@ -110,15 +110,13 @@ get_max_potential_workload_count(uint32_t max_tess_factor, SM50ShaderInternal *p
 
   switch (pHullStage->tessellation_domain) {
   case microsoft::D3D11_SB_TESSELLATOR_DOMAIN_UNDEFINED:
-    return 0;
   case microsoft::D3D11_SB_TESSELLATOR_DOMAIN_ISOLINE:
-    return max_tess_factor; // AnyOS: one workload per line
+    return 0;
   case microsoft::D3D11_SB_TESSELLATOR_DOMAIN_TRI:
     return std::ceil((max_tess_factor - 1) / 4.0) * 3 + (max_tess_factor & 1);
   case microsoft::D3D11_SB_TESSELLATOR_DOMAIN_QUAD:
-    // AnyOS: + 1 -- integer inner factors (63, 64) make 64 ring workloads plus
-    // the centre workload (gen_workload_quad_impl), one more than the formula.
-    return std::ceil((max_tess_factor - 1) / 4.0) * 4 + (max_tess_factor & 1) + 1;
+    return std::ceil((max_tess_factor - 1) / 4.0) * 4 + (max_tess_factor & 1);
+    ;
   }
 }
 
@@ -136,8 +134,7 @@ estimate_payload_size(SM50ShaderInternal *pHullStage, float factor, uint32_t pat
   constexpr uint32_t size_workload_info = sizeof(TessMeshWorkload);
 
   return cp_size_per_group + pc_size_per_group + sizeof(uint32_t) +
-         max_workload_count * patch_per_group * size_workload_info +
-         (max_workload_count * patch_per_group + 1) * sizeof(uint32_t); // AnyOS: group table
+         max_workload_count * patch_per_group * size_workload_info;
 };
 
 size_t estimate_mesh_size(SM50ShaderInternal *pDomainStage, uint32_t max_potential_factor_int) {
@@ -150,11 +147,7 @@ size_t estimate_mesh_size(SM50ShaderInternal *pDomainStage, uint32_t max_potenti
   */
   size_t size_per_vertex = pDomainStage->max_output_register * 16;
   size_t max_edge_point = max_potential_factor_int + 1;
-  // AnyOS: a workload pair may hold 2 * factor + 10 vertices (an inner edge
-  // of 3 with two outer edges of `factor`, gen_workload_triangle_impl's
-  // r + 1 == u case), one to five more than the edge-point formula.
-  size_t vertices = std::max<size_t>((max_edge_point + 2 - (max_edge_point & 1)) * 2 + 1, 2 * max_potential_factor_int + 10);
-  return vertices * size_per_vertex;
+  return ((max_edge_point + 2 - (max_edge_point & 1)) * 2 + 1) * size_per_vertex;
 }
 
 std::pair<float, uint32_t>
@@ -179,58 +172,6 @@ get_final_maxtessfactor(SM50ShaderInternal *pHullStage, SM50_SHADER_COMPILATION_
     return {minimal_factor, minimal_factor};
   }
   return {maxtessfactor, maxtessfactor_int};
-}
-
-// AnyOS: mesh workload groups.  Whether the object stage packs workloads into
-// groups (one mesh threadgroup per group) and the mesh output a group may
-// fill.  Both stages derive it from the same inputs: the pipeline's potential
-// tessellation factor (whose single-workload mesh fits the mesh-output budget
-// by construction, see MaxPotentialTessFactor).  Rasterized triangle output of the tri and
-// quad domains only; isolines, points, lines and streamed (geometry / stream
-// output) pipelines keep one workload per mesh threadgroup.  Group bounds are
-// encoded in 10 bits each, so the grid is limited to 1023 workloads.  The
-// per-primitive render-target / viewport array index of a pass-through
-// geometry shader is written per vertex index (primitive_id below), which
-// only lines up with one workload per threadgroup, so those pipelines keep
-// single workloads too.
-struct MeshGroupPlan {
-  bool enabled;
-  uint32_t max_vertices;
-  uint32_t max_primitives;
-};
-
-MeshGroupPlan
-get_mesh_group_plan(
-    SM50ShaderInternal *pHullStage, SM50_SHADER_COMPILATION_ARGUMENT_DATA *pArgs, bool stream,
-    uint32_t max_workloads_per_grid
-) {
-  using namespace microsoft;
-  auto [final_maxtessfactor, factor_int] = get_final_maxtessfactor(pHullStage, pArgs);
-  uint32_t potential = factor_int;
-  SM50_SHADER_PSO_TESSELLATOR_DATA *pso_tess = nullptr;
-  if (args_get_data<SM50_SHADER_PSO_TESSELLATOR, SM50_SHADER_PSO_TESSELLATOR_DATA>(pArgs, &pso_tess))
-    potential = std::max<uint32_t>(potential, pso_tess->max_potential_tess_factor);
-  // The mesh output the single-workload pipeline declares for this factor
-  // (vertices == primitives; a level-64 quad ring pair needs the full 133,
-  // clamping to the helper's 130 broke quad-level-64 in d3d11-tess-probe).
-  // Capacity: the largest single workload pair (2 * factor + 10 vertices,
-  // 2 * factor + 6 primitives: an inner edge of 3 with two outer edges of
-  // `factor`), never below the edge-point formula the single-workload mesh
-  // declares; estimate_mesh_size budgets the same count.
-  uint32_t edge_point = potential + 1;
-  uint32_t formula = (edge_point + 2 - (edge_point & 1)) * 2 + 1;
-  uint32_t vertices = std::max<uint32_t>(formula, 2 * potential + 10);
-  uint32_t primitives = std::max<uint32_t>(formula, 2 * potential + 6);
-  SM50_SHADER_GS_PASS_THROUGH_DATA *gs_passthrough = nullptr;
-  bool primitive_attributes =
-      args_get_data<SM50_SHADER_GS_PASS_THROUGH, SM50_SHADER_GS_PASS_THROUGH_DATA>(pArgs, &gs_passthrough) &&
-      (gs_passthrough->Data.RenderTargetArrayIndexReg != 255 || gs_passthrough->Data.ViewportArrayIndexReg != 255);
-  bool enabled = !stream && !primitive_attributes &&
-                 pHullStage->tessellation_domain != D3D11_SB_TESSELLATOR_DOMAIN_ISOLINE &&
-                 pHullStage->tessellator_output_primitive != D3D11_SB_TESSELLATOR_OUTPUT_POINT &&
-                 pHullStage->tessellator_output_primitive != D3D11_SB_TESSELLATOR_OUTPUT_LINE &&
-                 max_workloads_per_grid <= 1023;
-  return {enabled, vertices, primitives};
 }
 
 llvm::Error
@@ -258,12 +199,6 @@ convert_dxbc_vertex_hull_shader(
   uint32_t max_patch_constant_output_register = pHullStage->max_patch_constant_output_register;
 
   auto [final_maxtessfactor, factor_int] = get_final_maxtessfactor(pHullStage, pArgs);
-
-  // AnyOS: the domain stage streams to a geometry pipeline / stream output
-  // (passed to the hull variant as well so both stages agree on mesh groups)
-  SM50_SHADER_TESSELLATION_STREAM_DATA *hs_stream_data = nullptr;
-  bool hs_stream =
-      args_get_data<SM50_SHADER_TESSELLATION_STREAM, SM50_SHADER_TESSELLATION_STREAM_DATA>(pArgs, &hs_stream_data);
 
   SM50_SHADER_METAL_VERSION metal_version = SM50_SHADER_METAL_310;
   SM50_SHADER_FLAG shader_flags = {};
@@ -344,21 +279,14 @@ convert_dxbc_vertex_hull_shader(
 
   uint32_t max_workload_count = get_max_potential_workload_count(factor_int, pHullStage);
 
-  // AnyOS: every patch of the threadgroup adds its workloads to one mesh grid,
-  // so the grid can hold patch_per_group times one patch's maximum. Declaring
-  // one patch's maximum let the object stage dispatch past its declared limit
-  // (undefined: patches dropped or drawn from stale payload, flickering per
-  // frame -- Unigine Heaven tessellation, 2026-10-02).
-  func_signature.UseMaxMeshWorkgroupSize(max_workload_count * patch_per_group);
-  auto group_plan = get_mesh_group_plan(pHullStage, pArgs, hs_stream, max_workload_count * patch_per_group);
+  func_signature.UseMaxMeshWorkgroupSize(max_workload_count);
 
   constexpr uint32_t size_workload_info = sizeof(TessMeshWorkload);
 
   auto payload_struct_type = llvm::StructType::create(
       context,
       {hs_output_per_group_type, hs_pcout_per_group_scaler_type, types._int,
-       llvm::ArrayType::get(types._int, max_workload_count * patch_per_group * size_workload_info / 4),
-       llvm::ArrayType::get(types._int, max_workload_count * patch_per_group + 1)}, // AnyOS: group table
+       llvm::ArrayType::get(types._int, max_workload_count * patch_per_group * size_workload_info / 4)},
       "payload"
   );
   uint32_t payload_struct_size = module.getDataLayout().getTypeAllocSize(payload_struct_type);
@@ -434,20 +362,6 @@ convert_dxbc_vertex_hull_shader(
       llvm::GlobalValue::NotThreadLocal, (uint32_t)air::AddressSpace::threadgroup
   );
   vertex_out->setAlignment(llvm::Align(4));
-
-  // AnyOS: the patches of a threadgroup add their mesh workloads to one
-  // counter. It is zeroed once here, before the barrier that ends the vertex
-  // zone (every thread stores the same 0), not by each patch's first thread:
-  // that cleared other patches' already-counted workloads, and the count was
-  // read before every patch had added to it, so the mesh stage ran stale
-  // workload entries (flickering spikes and flat triangles, Unigine Heaven
-  // instanced tessellation, 2026-10-02).
-  llvm::GlobalVariable *workload_count = new llvm::GlobalVariable(
-      module, types._int, false, llvm::GlobalValue::InternalLinkage, llvm::UndefValue::get(types._int),
-      "workload_count", nullptr, llvm::GlobalValue::NotThreadLocal, (uint32_t)air::AddressSpace::threadgroup
-  );
-  workload_count->setAlignment(llvm::Align(4));
-  builder.CreateStore(builder.getInt32(0), workload_count);
 
   auto thread_position_in_group = function->getArg(thread_id_idx);
   auto control_point_id_in_patch = builder.CreateExtractElement(thread_position_in_group, (uint32_t)0);
@@ -749,17 +663,18 @@ convert_dxbc_vertex_hull_shader(
       }
     };
 
+    llvm::GlobalVariable *workload_count = new llvm::GlobalVariable(
+        module, types._int, false, llvm::GlobalValue::InternalLinkage, llvm::UndefValue::get(types._int),
+        "workload_count", nullptr, llvm::GlobalValue::NotThreadLocal, (uint32_t)air::AddressSpace::threadgroup
+    );
+    workload_count->setAlignment(llvm::Align(4));
+
+    // clear value
+    air.CreateAtomicRMW(llvm::AtomicRMWInst::And, workload_count, builder.getInt32(0));
 
     switch (pHullStage->tessellation_domain) {
     case microsoft::D3D11_SB_TESSELLATOR_DOMAIN_ISOLINE:
-      // AnyOS: line detail is tess factor 0, line density 1.
-      dxbc.HullGenerateWorkloadForIsoline(
-          patch_offset_in_group, workload_count,
-          builder.CreateGEP(
-              payload_struct_type, payload, {builder.getInt32(0), builder.getInt32(3), builder.getInt32(0)}
-          ),
-          get_partitioning(pHullStage), tess_factors[0], tess_factors[1]
-      );
+      // TESS TODO
       break;
     case microsoft::D3D11_SB_TESSELLATOR_DOMAIN_QUAD:
       dxbc.HullGenerateWorkloadForQuad(
@@ -782,39 +697,17 @@ convert_dxbc_vertex_hull_shader(
     }
     }
 
-    builder.CreateBr(real_return);
-    builder.SetInsertPoint(real_return);
-
-    // Every patch has added its workloads: one thread dispatches the meshes.
-    // AnyOS: the payload (object_data) too -- the group packer below reads the
-    // workloads the other patches' threads wrote.
-    air.CreateBarrier((llvm::air::MemFlags)((uint32_t)llvm::air::MemFlags::Threadgroup | (uint32_t)llvm::air::MemFlags::ObjectData));
-    auto final_return = llvm::BasicBlock::Create(context, "final_return", function);
     builder.CreateCondBr(
-        builder.CreateAnd(
-            builder.CreateICmp(llvm::CmpInst::ICMP_EQ, patch_offset_in_group, builder.getInt32(0)),
-            builder.CreateICmp(llvm::CmpInst::ICMP_EQ, control_point_id_in_patch, builder.getInt32(0))
-        ),
-        dispatch_mesh, final_return
+        builder.CreateICmp(llvm::CmpInst::ICMP_EQ, patch_offset_in_group, builder.getInt32(0)), dispatch_mesh,
+        real_return
     );
 
     builder.SetInsertPoint(dispatch_mesh);
 
     llvm::Value *meshgroup_to_dispatch = air.getInt3(1, 1, 1);
-    llvm::Value *meshgroups = builder.CreateLoad(types._int, workload_count);
-    if (group_plan.enabled) {
-      // AnyOS: one mesh threadgroup per workload group
-      meshgroups = dxbc.HullPackWorkloadGroups(
-          builder.CreateGEP(
-              payload_struct_type, payload, {builder.getInt32(0), builder.getInt32(3), builder.getInt32(0)}
-          ),
-          meshgroups, builder.getInt32(group_plan.max_vertices), builder.getInt32(group_plan.max_primitives),
-          builder.CreateGEP(
-              payload_struct_type, payload, {builder.getInt32(0), builder.getInt32(4), builder.getInt32(0)}
-          )
-      );
-    }
-    meshgroup_to_dispatch = builder.CreateInsertElement(meshgroup_to_dispatch, meshgroups, (uint64_t)0);
+    meshgroup_to_dispatch = builder.CreateInsertElement(
+        meshgroup_to_dispatch, builder.CreateLoad(types._int, workload_count), (uint64_t)0
+    );
 
     air.CreateSetMeshProperties(meshgroup_to_dispatch);
 
@@ -823,10 +716,11 @@ convert_dxbc_vertex_hull_shader(
         builder.CreateGEP(payload_struct_type, payload, {builder.getInt32(0), builder.getInt32(2)})
     );
 
-    builder.CreateBr(final_return);
-    builder.SetInsertPoint(final_return);
+    builder.CreateBr(real_return);
+    builder.SetInsertPoint(real_return);
   }
 
+  air.CreateBarrier(llvm::air::MemFlags::Threadgroup);
   builder.CreateRetVoid();
 
   module.getOrInsertNamedMetadata("air.object")->addOperand(function_metadata);
@@ -849,19 +743,6 @@ convert_dxbc_tesselator_domain_shader(
   bool rasterization_disabled =
       (args_get_data<SM50_SHADER_GS_PASS_THROUGH, SM50_SHADER_GS_PASS_THROUGH_DATA>(pArgs, &gs_passthrough) &&
        gs_passthrough->RasterizationDisabled);
-  // AnyOS: tessellation followed by a geometry shader -- stream the vertices
-  // and primitives to buffers for the geometry pipeline instead of rasterizing.
-  SM50_SHADER_TESSELLATION_STREAM_DATA *stream_data = nullptr;
-  bool stream = args_get_data<SM50_SHADER_TESSELLATION_STREAM, SM50_SHADER_TESSELLATION_STREAM_DATA>(pArgs, &stream_data);
-  if (stream)
-    rasterization_disabled = true;
-  // AnyOS: domain shader stream output -- the stream above plus a record per
-  // workload (dxmt.domain_so_stream_primitives.*).
-  SM50_SHADER_TESSELLATION_STREAM_OUTPUT_DATA *so_data = nullptr;
-  bool stream_output =
-      stream && args_get_data<SM50_SHADER_TESSELLATION_STREAM_OUTPUT, SM50_SHADER_TESSELLATION_STREAM_OUTPUT_DATA>(
-                    pArgs, &so_data
-                );
   SM50_SHADER_METAL_VERSION metal_version = SM50_SHADER_METAL_310;
   SM50_SHADER_FLAG shader_flags = {};
   SM50_SHADER_COMMON_DATA *sm50_common = nullptr;
@@ -932,8 +813,7 @@ convert_dxbc_tesselator_domain_shader(
   auto payload_struct_type = llvm::StructType::create(
       context,
       {hs_output_per_group_type, hs_pcout_per_group_scaler_type, types._int,
-       llvm::ArrayType::get(types._int, max_workload_count * patch_per_group * size_workload_info / 4),
-       llvm::ArrayType::get(types._int, max_workload_count * patch_per_group + 1)}, // AnyOS: group table
+       llvm::ArrayType::get(types._int, max_workload_count * patch_per_group * size_workload_info / 4)},
       "payload"
   );
   uint32_t payload_struct_size = module.getDataLayout().getTypeAllocSize(payload_struct_type);
@@ -941,7 +821,6 @@ convert_dxbc_tesselator_domain_shader(
   uint32_t payload_idx = func_signature.DefineInput(air::InputPayload{.size = payload_struct_size});
 
   bool point_rasterization = false;
-  auto group_plan = get_mesh_group_plan(pHullStage, pArgs, stream, max_workload_count * patch_per_group);
 
   switch (pHullStage->tessellator_output_primitive) {
   case microsoft::D3D11_SB_TESSELLATOR_OUTPUT_POINT: {
@@ -952,20 +831,13 @@ convert_dxbc_tesselator_domain_shader(
     break;
   }
   case microsoft::D3D11_SB_TESSELLATOR_OUTPUT_LINE: {
-    // AnyOS: one isoline per workload (generatePrimitiveLine).
+    // TESS TODO
     func_signature.DefineInput(
         air::InputMesh{(uint32_t)max_edge_point, (uint32_t)max_edge_point - 1, air::MeshOutputTopology::Line}
     );
     break;
   }
   default: {
-    if (group_plan.enabled) {
-      // AnyOS: a workload group fills the mesh output
-      func_signature.DefineInput(
-          air::InputMesh{group_plan.max_vertices, group_plan.max_primitives, air::MeshOutputTopology::Triangle}
-      );
-      break;
-    }
     func_signature.DefineInput(air::InputMesh{
         (uint32_t)(max_edge_point + 2 - (max_edge_point & 1)) * 2 + 1,
         (uint32_t)(max_edge_point + 2 - (max_edge_point & 1)) * 2 + 1,
@@ -983,27 +855,6 @@ convert_dxbc_tesselator_domain_shader(
     func_signature.DefineMeshVertexOutput(
         air::OutputClipDistance{.count = pShaderInternal->clip_distance_scalars.size()}
     );
-  }
-
-  uint32_t stream_vertex_idx = ~0u, stream_index_idx = ~0u, stream_counter_idx = ~0u, stream_record_idx = ~0u;
-  if (stream) {
-    auto stream_buffer = [&](uint32_t location, const char *arg_name) {
-      return func_signature.DefineInput(air::ArgumentBindingBuffer{
-          .buffer_size = {},
-          .location_index = location,
-          .array_size = 0,
-          .memory_access = air::MemoryAccess::read_write,
-          .address_space = air::AddressSpace::device,
-          .type = air::MSLUint{},
-          .arg_name = arg_name,
-          .raster_order_group = {}
-      });
-    };
-    stream_vertex_idx = stream_buffer(SM50_BINDING_INDEX_TESS_STREAM_VERTEX, "tess_stream_vertex");
-    stream_index_idx = stream_buffer(SM50_BINDING_INDEX_TESS_STREAM_INDEX, "tess_stream_index");
-    stream_counter_idx = stream_buffer(SM50_BINDING_INDEX_TESS_STREAM_COUNTER, "tess_stream_counter");
-    if (stream_output)
-      stream_record_idx = stream_buffer(SM50_BINDING_INDEX_TESS_STREAM_RECORD, "tess_stream_record");
   }
 
   auto [function, function_metadata] = func_signature.CreateFunction(name, context, module, 0, rasterization_disabled);
@@ -1058,32 +909,8 @@ convert_dxbc_tesselator_domain_shader(
       types._int, builder.CreateGEP(payload_struct_type, payload, {builder.getInt32(0), builder.getInt32(2)})
   );
 
-  // AnyOS: mesh workload groups -- this threadgroup's workload range
-  llvm::Value *group_first = nullptr, *group_last = nullptr;
-  if (group_plan.enabled) {
-    group_first = builder.CreateLoad(
-        types._int,
-        builder.CreateGEP(payload_struct_type, payload, {builder.getInt32(0), builder.getInt32(4), workload_index})
-    );
-    group_last = builder.CreateLoad(
-        types._int, builder.CreateGEP(
-                        payload_struct_type, payload,
-                        {builder.getInt32(0), builder.getInt32(4),
-                         builder.CreateAdd(workload_index, builder.getInt32(1))}
-                    )
-    );
-  }
+  auto patch_index = dxbc.DomainGetPatchIndex(workload_index, data);
 
-  llvm::Value *stream_vertex_base = nullptr;
-  if (stream) {
-    stream_vertex_base =
-        dxbc.DomainStreamReserve(workload_index, data, function->getArg(stream_counter_idx));
-  }
-
-  // AnyOS: the patch of a workload (per threadgroup; per vertex when the
-  // threadgroup runs a workload group, whose workloads may belong to
-  // different patches of the object threadgroup)
-  auto setup_patch = [&](llvm::Value *patch_index) {
   resource_map.patch_id = builder.CreateAdd(batched_patch_start, patch_index);
 
   resource_map.input.ptr_int4 = builder.CreateGEP(
@@ -1095,7 +922,6 @@ convert_dxbc_tesselator_domain_shader(
   resource_map.input.ptr_float4 =
       builder.CreateBitCast(resource_map.input.ptr_int4, hs_output_per_patch_type_float->getPointerTo(6));
   resource_map.input_element_count = pHullStage->max_output_register;
-  };
 
   resource_map.patch_constant_output.ptr_int4 =
       builder.CreateAlloca(llvm::ArrayType::get(types._int4, max_input_register));
@@ -1114,7 +940,6 @@ convert_dxbc_tesselator_domain_shader(
   resource_map.output_element_count = max_output_register;
 
   /* setup patch constant register */
-  auto setup_patch_constants = [&](llvm::Value *patch_index) {
   for (auto x : llvm::enumerate(pHullStage->patch_constant_scalars)) {
     if (x.value().reg >= max_input_register)
       continue;
@@ -1130,13 +955,6 @@ convert_dxbc_tesselator_domain_shader(
     );
     builder.CreateStore(builder.CreateLoad(types._int, src_ptr), dst_ptr);
   }
-  };
-
-  if (!group_plan.enabled) {
-    auto patch_index = dxbc.DomainGetPatchIndex(workload_index, data);
-    setup_patch(patch_index);
-    setup_patch_constants(patch_index);
-  }
 
   builder.CreateBr(vertex_start);
 
@@ -1147,21 +965,9 @@ convert_dxbc_tesselator_domain_shader(
 
   auto actual_thread_index = builder.CreateAdd(phi_thread_index_base, thread_index);
 
-  llvm::Value *location, *active, *iterate;
-  if (group_plan.enabled) {
-    // AnyOS: vertex actual_thread_index of the group -> (workload, local vertex)
-    auto packed = dxbc.DomainLocateGroupVertex(group_first, group_last, actual_thread_index, data);
-    auto vertex_workload = builder.CreateAnd(packed, builder.getInt32(0xffff));
-    auto vertex_local = builder.CreateLShr(packed, builder.getInt32(16));
-    std::tie(location, active, iterate) =
-        dxbc.DomainGetLocation(vertex_workload, vertex_local, data, get_partitioning(pHullStage));
-    auto patch_index = dxbc.DomainGetPatchIndex(vertex_workload, data);
-    setup_patch(patch_index);
-    setup_patch_constants(patch_index);
-  } else {
-    std::tie(location, active, iterate) =
-        dxbc.DomainGetLocation(workload_index, actual_thread_index, data, get_partitioning(pHullStage));
-  }
+  auto [location, active, iterate] = dxbc.DomainGetLocation(
+      workload_index, actual_thread_index, data, get_partitioning(pHullStage)
+  );
 
   // It accidentally works on quad as well
   {
@@ -1185,29 +991,6 @@ convert_dxbc_tesselator_domain_shader(
 
   auto vertex_id = actual_thread_index;
   auto primitive_id = actual_thread_index; // 
-  if (stream) {
-    // Every output register of the vertex, at (vertex base + vertex) * registers.
-    auto store_bb = llvm::BasicBlock::Create(context, "stream_store", function);
-    builder.CreateCondBr(
-        builder.CreateICmpNE(stream_vertex_base, builder.getInt32(-1)), store_bb, vertex_end
-    );
-    builder.SetInsertPoint(store_bb);
-    auto out_ptr = builder.CreateBitCast(function->getArg(stream_vertex_idx), types._int4->getPointerTo(1));
-    auto slot = builder.CreateMul(
-        builder.CreateAdd(stream_vertex_base, vertex_id), builder.getInt32(max_output_register)
-    );
-    for (uint32_t reg = 0; reg < max_output_register; reg++) {
-      auto src_ptr = builder.CreateGEP(
-          llvm::ArrayType::get(types._int4, max_output_register), resource_map.output.ptr_int4,
-          {builder.getInt32(0), builder.getInt32(reg)}
-      );
-      builder.CreateStore(
-          builder.CreateLoad(types._int4, src_ptr),
-          builder.CreateGEP(types._int4, out_ptr, {builder.CreateAdd(slot, builder.getInt32(reg))})
-      );
-    }
-    builder.CreateBr(vertex_end);
-  } else {
   MeshOutputContext gs_out_ctx{vertex_id, primitive_id};
   for (auto &h : ds_output_handlers) {
     if (auto err = h(gs_out_ctx).build(ctx).takeError()) {
@@ -1249,53 +1032,18 @@ convert_dxbc_tesselator_domain_shader(
   }
 
   builder.CreateBr(vertex_end);
-  }
 
   builder.SetInsertPoint(vertex_end);
   phi_thread_index_base->addIncoming(builder.CreateAdd(phi_thread_index_base, air.getInt(32)), vertex_end);
   builder.CreateCondBr(iterate, vertex_start, generate_primitive_pre);
 
   builder.SetInsertPoint(generate_primitive_pre);
-  // AnyOS: rasterized triangle domains generate primitives from every mesh
-  // thread (the helper receives the thread index in workload_index bits 16..)
-  bool parallel_primitives =
-      !stream && !point_rasterization &&
-      pHullStage->tessellator_output_primitive != microsoft::D3D11_SB_TESSELLATOR_OUTPUT_LINE;
-  if (parallel_primitives || group_plan.enabled)
-    builder.CreateBr(generate_primitive);
-  else
-    builder.CreateCondBr(
-        builder.CreateICmp(llvm::CmpInst::ICMP_EQ, thread_index, builder.getInt32(0)), generate_primitive, real_return
-    );
+  builder.CreateCondBr(
+      builder.CreateICmp(llvm::CmpInst::ICMP_EQ, thread_index, builder.getInt32(0)), generate_primitive, real_return
+  );
   builder.SetInsertPoint(generate_primitive);
 
-  if (stream_output) {
-    dxbc.DomainSOStreamPrimitives(
-        workload_index, data, function->getArg(stream_index_idx), function->getArg(stream_counter_idx),
-        stream_vertex_base, function->getArg(stream_record_idx), resource_map.patch_id,
-        get_output_primitive(pHullStage)
-    );
-  } else if (stream) {
-    dxbc.DomainStreamPrimitives(
-        workload_index, data, function->getArg(stream_index_idx), function->getArg(stream_counter_idx),
-        stream_vertex_base, get_output_primitive(pHullStage)
-    );
-  } else if (group_plan.enabled) {
-    // AnyOS: the group's primitives: first | last << 10 | thread << 20
-    dxbc.DomainGenerateGroupPrimitives(
-        builder.CreateOr(
-            builder.CreateOr(group_first, builder.CreateShl(group_last, 10)), builder.CreateShl(thread_index, 20)
-        ),
-        data, get_output_primitive(pHullStage)
-    );
-  } else if (parallel_primitives) {
-    // AnyOS: triangle primitive generation also receives the mesh thread index (bits 16..)
-    dxbc.DomainGeneratePrimitives(
-        builder.CreateOr(workload_index, builder.CreateShl(thread_index, 16)), data, get_output_primitive(pHullStage)
-    );
-  } else {
-    dxbc.DomainGeneratePrimitives(workload_index, data, get_output_primitive(pHullStage));
-  }
+  dxbc.DomainGeneratePrimitives(workload_index, data, get_output_primitive(pHullStage));
 
   builder.CreateBr(real_return);
   builder.SetInsertPoint(real_return);
