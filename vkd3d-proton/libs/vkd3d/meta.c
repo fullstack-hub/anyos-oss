@@ -2033,6 +2033,8 @@ static void vkd3d_execute_indirect_ops_cleanup(struct vkd3d_execute_indirect_ops
     vkd3d_free(meta_indirect_ops->pipelines);
 }
 
+static void vkd3d_dstorage_ops_cleanup(struct vkd3d_dstorage_ops *dstorage_ops, struct d3d12_device *device);
+
 static HRESULT vkd3d_dstorage_ops_init(struct vkd3d_dstorage_ops *dstorage_ops, struct d3d12_device *device)
 {
     VkPipelineShaderStageRequiredSubgroupSizeCreateInfo required_size;
@@ -2054,21 +2056,30 @@ static HRESULT vkd3d_dstorage_ops_init(struct vkd3d_dstorage_ops *dstorage_ops, 
 
     if ((vr = vkd3d_meta_create_pipeline_layout(device, 0, NULL, &push_range,
             &dstorage_ops->vk_dstorage_layout)))
-        return hresult_from_vk_result(vr);
+    {
+        dstorage_ops->vk_dstorage_layout = VK_NULL_HANDLE;
+        goto fail;
+    }
 
     if ((vr = vkd3d_meta_create_compute_pipeline(device,
             sizeof(cs_emit_nv_memory_decompression_regions),
             cs_emit_nv_memory_decompression_regions,
             dstorage_ops->vk_dstorage_layout,
             NULL, false, NULL, &dstorage_ops->vk_emit_nv_memory_decompression_regions_pipeline)))
-        return hresult_from_vk_result(vr);
+    {
+        dstorage_ops->vk_emit_nv_memory_decompression_regions_pipeline = VK_NULL_HANDLE;
+        goto fail;
+    }
 
     if ((vr = vkd3d_meta_create_compute_pipeline(device,
             sizeof(cs_emit_nv_memory_decompression_workgroups),
             cs_emit_nv_memory_decompression_workgroups,
             dstorage_ops->vk_dstorage_layout,
             NULL, false, NULL, &dstorage_ops->vk_emit_nv_memory_decompression_workgroups_pipeline)))
-        return hresult_from_vk_result(vr);
+    {
+        dstorage_ops->vk_emit_nv_memory_decompression_workgroups_pipeline = VK_NULL_HANDLE;
+        goto fail;
+    }
 
     if (!d3d12_device_use_nv_memory_decompression(device) &&
             device->device_info.vulkan_1_2_features.storageBuffer8BitAccess &&
@@ -2079,7 +2090,10 @@ static HRESULT vkd3d_dstorage_ops_init(struct vkd3d_dstorage_ops *dstorage_ops, 
         if ((vr = vkd3d_meta_create_compute_pipeline(device,
                 sizeof(cs_gdeflate_prepare), cs_gdeflate_prepare, dstorage_ops->vk_dstorage_layout,
                 NULL, false, NULL, &dstorage_ops->vk_gdeflate_prepare_pipeline)))
-            return hresult_from_vk_result(vr);
+        {
+            dstorage_ops->vk_gdeflate_prepare_pipeline = VK_NULL_HANDLE;
+            goto fail;
+        }
 
         memset(&required_size, 0, sizeof(required_size));
         required_size.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_REQUIRED_SUBGROUP_SIZE_CREATE_INFO;
@@ -2094,9 +2108,23 @@ static HRESULT vkd3d_dstorage_ops_init(struct vkd3d_dstorage_ops *dstorage_ops, 
         if ((vr = vkd3d_meta_create_compute_pipeline(device,
                 sizeof(cs_gdeflate), cs_gdeflate, dstorage_ops->vk_dstorage_layout,
                 NULL, false, force_wave32 ? &required_size : NULL, &dstorage_ops->vk_gdeflate_pipeline)))
-            return hresult_from_vk_result(vr);
+        {
+            dstorage_ops->vk_gdeflate_pipeline = VK_NULL_HANDLE;
+            goto fail;
+        }
     }
 
+    return S_OK;
+
+fail:
+    /* GPU decompression is an optional DirectStorage meta command; the
+     * translation layer underneath the AnyOS host (MoltenVK) rejects these
+     * shaders, which must not take the whole device down with them.
+     * vkd3d_check_meta_command_support() sees the null pipelines and leaves
+     * the meta command unadvertised. */
+    WARN("Failed to create DirectStorage meta pipelines, vr %d; GPU decompression is disabled.\n", vr);
+    vkd3d_dstorage_ops_cleanup(dstorage_ops, device);
+    memset(dstorage_ops, 0, sizeof(*dstorage_ops));
     return S_OK;
 }
 

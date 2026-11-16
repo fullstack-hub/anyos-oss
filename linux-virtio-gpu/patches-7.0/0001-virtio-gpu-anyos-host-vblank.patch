@@ -1,0 +1,681 @@
+--- a/Makefile
++++ b/Makefile
+@@ -6,6 +6,11 @@
+ virtio-gpu-y := virtgpu_drv.o virtgpu_kms.o virtgpu_gem.o virtgpu_vram.o \
+ 	virtgpu_display.o virtgpu_vq.o \
+ 	virtgpu_fence.o virtgpu_object.o virtgpu_debugfs.o virtgpu_plane.o \
+-	virtgpu_ioctl.o virtgpu_prime.o virtgpu_trace_points.o virtgpu_submit.o
++	virtgpu_ioctl.o virtgpu_prime.o virtgpu_trace_points.o virtgpu_submit.o \
++	virtgpu_vblank.o
++
++# AnyOS: the tracepoint header is found next to the sources when this
++# driver is built out of tree (see virtgpu_trace.h).
++CFLAGS_virtgpu_trace_points.o := -I$(src)
+ 
+ obj-$(CONFIG_DRM_VIRTIO_GPU) += virtio-gpu.o
+--- a/virtgpu_debugfs.c
++++ b/virtgpu_debugfs.c
+@@ -27,6 +27,7 @@
+ 
+ #include <drm/drm_debugfs.h>
+ #include <drm/drm_file.h>
++#include <drm/drm_vblank.h>
+ #include <drm/drm_print.h>
+ 
+ #include "virtgpu_drv.h"
+@@ -95,8 +96,42 @@
+ 	return 0;
+ }
+ 
++static int
++virtio_gpu_debugfs_anyos_vblank(struct seq_file *m, void *data)
++{
++	struct drm_info_node *node = (struct drm_info_node *)m->private;
++	struct virtio_gpu_device *vgdev = node->minor->dev->dev_private;
++	int i;
++
++	if (!vgdev->vblank.enabled) {
++		seq_puts(m, "anyos vblank not negotiated\n");
++		return 0;
++	}
++	seq_printf(m, "running %d crtcs 0x%x period_ns %lld host_interval_ns %lld offset_ns %lld\n",
++		   vgdev->vblank.running, vgdev->vblank.running_crtcs, vgdev->vblank.period_ns,
++		   vgdev->vblank.host_interval_ns,
++		   vgdev->vblank.offset_valid ? vgdev->vblank.offset_ns : 0);
++	seq_printf(m, "received %llu posted %llu held %u folded %llu coalesced %llu short %llu post_failures %llu\n",
++		   vgdev->vblank.received, vgdev->vblank.posted,
++		   vgdev->vblank.held_count, vgdev->vblank.folded,
++		   vgdev->vblank.coalesced, vgdev->vblank.short_events,
++		   vgdev->vblank.post_failures);
++	seq_printf(m, "host_ticks %llu timer_ticks %llu timer_late %llu timer_early %llu offset_snaps %llu enables %llu\n",
++		   vgdev->vblank.host_ticks, vgdev->vblank.timer_ticks,
++		   vgdev->vblank.timer_late, vgdev->vblank.timer_early,
++		   vgdev->vblank.offset_snaps, vgdev->vblank.enables);
++	seq_printf(m, "max_delivery_ns %lld max_phase_error_ns %lld max_tick_gap_ns %lld\n",
++		   vgdev->vblank.max_delivery_ns, vgdev->vblank.max_phase_error_ns,
++		   vgdev->vblank.max_tick_gap_ns);
++	for (i = 0; i < vgdev->num_scanouts; i++)
++		seq_printf(m, "crtc%d vblank_count %llu\n", i,
++			   drm_crtc_vblank_count(&vgdev->outputs[i].crtc));
++	return 0;
++}
++
+ static struct drm_info_list virtio_gpu_debugfs_list[] = {
+ 	{ "virtio-gpu-features", virtio_gpu_features },
++	{ "virtio-gpu-anyos-vblank", virtio_gpu_debugfs_anyos_vblank },
+ 	{ "virtio-gpu-irq-fence", virtio_gpu_debugfs_irq_info, 0, NULL },
+ 	{ "virtio-gpu-host-visible-mm", virtio_gpu_debugfs_host_visible_mm },
+ };
+--- a/virtgpu_display.c
++++ b/virtgpu_display.c
+@@ -61,6 +61,23 @@
+ 	DRM_CRTC_VBLANK_TIMER_FUNCS,
+ };
+ 
++/*
++ * AnyOS: with the host vblank negotiated the CRTCs tick from
++ * virtgpu_vblank.c instead of the DRM vblank timer (no
++ * get_vblank_timestamp: the core stamps each tick when it is handled).
++ */
++static const struct drm_crtc_funcs virtio_gpu_anyos_crtc_funcs = {
++	.set_config             = drm_atomic_helper_set_config,
++	.destroy                = drm_crtc_cleanup,
++
++	.page_flip              = drm_atomic_helper_page_flip,
++	.reset                  = drm_atomic_helper_crtc_reset,
++	.atomic_duplicate_state = drm_atomic_helper_crtc_duplicate_state,
++	.atomic_destroy_state   = drm_atomic_helper_crtc_destroy_state,
++	.enable_vblank          = virtio_gpu_vblank_enable,
++	.disable_vblank         = virtio_gpu_vblank_disable,
++};
++
+ static const struct drm_framebuffer_funcs virtio_gpu_fb_funcs = {
+ 	.create_handle = drm_gem_fb_create_handle,
+ 	.destroy = drm_gem_fb_destroy,
+@@ -103,6 +120,11 @@
+ static void virtio_gpu_crtc_atomic_enable(struct drm_crtc *crtc,
+ 					  struct drm_atomic_state *state)
+ {
++	struct virtio_gpu_device *vgdev = crtc->dev->dev_private;
++
++	/* AnyOS: the tick runs at the mode's rate until the host says. */
++	if (vgdev->vblank.wanted)
++		virtio_gpu_vblank_set_mode(vgdev, &crtc->state->adjusted_mode);
+ 	drm_crtc_vblank_on(crtc);
+ }
+ 
+@@ -295,6 +317,8 @@
+ 	if (IS_ERR(cursor))
+ 		return PTR_ERR(cursor);
+ 	ret = drm_crtc_init_with_planes(dev, crtc, primary, cursor,
++					vgdev->vblank.wanted ?
++					&virtio_gpu_anyos_crtc_funcs :
+ 					&virtio_gpu_crtc_funcs, NULL);
+ 	if (ret)
+ 		return ret;
+--- a/virtgpu_drv.c
++++ b/virtgpu_drv.c
+@@ -166,6 +166,7 @@
+ 	VIRTIO_GPU_F_RESOURCE_UUID,
+ 	VIRTIO_GPU_F_RESOURCE_BLOB,
+ 	VIRTIO_GPU_F_CONTEXT_INIT,
++	VIRTIO_GPU_F_ANYOS_VBLANK,
+ };
+ static struct virtio_driver virtio_gpu_driver = {
+ 	.feature_table = features,
+--- a/virtgpu_drv.h
++++ b/virtgpu_drv.h
+@@ -202,6 +202,46 @@
+ #define to_virtio_gpu_plane_state(x) \
+ 	container_of(x, struct virtio_gpu_plane_state, base)
+ 
++/*
++ * Any OS: host-driven vblank (virtgpu_vblank.c).  AnyOS-private feature
++ * bit in the device-specific range and the event the third virtqueue
++ * completes per host vblank, as the AnyOS engine's virtio-gpu defines them.
++ */
++#define VIRTIO_GPU_F_ANYOS_VBLANK 20
++#define VIRTIO_GPU_ANYOS_VBLANK_BUFFERS 8
++
++struct anyos_vblank_event {
++	__le64 seq;           /* host vblank counter, monotonic per viewer */
++	__le64 host_time_ns;  /* host CLOCK_MONOTONIC of the vblank */
++	__le32 interval_us;   /* host refresh period */
++	__le32 flags;         /* 0 */
++};
++
++struct virtio_gpu_vblank {
++	bool wanted;                 /* negotiated and not turned off: the CRTCs use these funcs */
++	bool enabled;                /* feature negotiated, queue set up */
++	bool running;                /* the DRM core has vblank enabled on a CRTC */
++	u32 running_crtcs;           /* ... on these CRTCs (enable/disable are per CRTC) */
++	struct virtqueue *vq;
++	spinlock_t lock;             /* everything below */
++	struct hrtimer timer;        /* the tick, phase-locked to the host */
++	s64 period_ns;               /* the mode's refresh period */
++	s64 host_interval_ns;        /* the host display's, as reported */
++	s64 next_ns;                 /* next unserved slot (guest clock) */
++	s64 last_tick_ns;            /* slot of the last delivered tick */
++	bool offset_valid;
++	s64 offset_ns;               /* guest clock minus host clock, floor */
++	struct anyos_vblank_event *events;
++	struct anyos_vblank_event *held[VIRTIO_GPU_ANYOS_VBLANK_BUFFERS];
++	unsigned int held_count;     /* buffers kept back while not running */
++	/* Diagnostics (debugfs virtio-gpu-anyos-vblank). */
++	u64 received, posted, folded, coalesced, short_events, post_failures;
++	u64 host_ticks, timer_ticks, timer_late, timer_early, offset_snaps;
++	u64 enables;
++	s64 max_delivery_ns, max_phase_error_ns;
++	s64 last_delivered_ns, max_tick_gap_ns;
++};
++
+ struct virtio_gpu_queue {
+ 	struct virtqueue *vq;
+ 	spinlock_t qlock;
+@@ -235,6 +275,7 @@
+ 
+ 	struct virtio_gpu_queue ctrlq;
+ 	struct virtio_gpu_queue cursorq;
++	struct virtio_gpu_vblank vblank;
+ 	struct kmem_cache *vbufs;
+ 
+ 	atomic_t pending_commands;
+@@ -496,6 +537,19 @@
+ 
+ /* virtgpu_debugfs.c */
+ void virtio_gpu_debugfs_init(struct drm_minor *minor);
++
++/* virtgpu_vblank.c */
++bool virtio_gpu_vblank_wanted(struct virtio_device *vdev);
++void virtio_gpu_vblank_ack(struct virtqueue *vq);
++int virtio_gpu_vblank_init(struct virtio_gpu_device *vgdev,
++			   struct virtqueue *vq);
++void virtio_gpu_vblank_start(struct virtio_gpu_device *vgdev);
++void virtio_gpu_vblank_stop(struct virtio_gpu_device *vgdev);
++void virtio_gpu_vblank_fini(struct virtio_gpu_device *vgdev);
++void virtio_gpu_vblank_set_mode(struct virtio_gpu_device *vgdev,
++				const struct drm_display_mode *mode);
++int virtio_gpu_vblank_enable(struct drm_crtc *crtc);
++void virtio_gpu_vblank_disable(struct drm_crtc *crtc);
+ 
+ /* virtgpu_vram.c */
+ bool virtio_gpu_is_vram(struct virtio_gpu_object *bo);
+--- a/virtgpu_kms.c
++++ b/virtgpu_kms.c
+@@ -120,10 +120,12 @@
+ 	struct virtqueue_info vqs_info[] = {
+ 		{ "control", virtio_gpu_ctrl_ack },
+ 		{ "cursor", virtio_gpu_cursor_ack },
++		/* AnyOS: the host's vblank queue (feature bit 20). */
++		{ "anyos-vblank", virtio_gpu_vblank_ack },
+ 	};
+ 	struct virtio_gpu_device *vgdev;
+ 	/* this will expand later */
+-	struct virtqueue *vqs[2];
++	struct virtqueue *vqs[3];
+ 	u32 num_scanouts, num_capsets;
+ 	int ret = 0;
+ 
+@@ -207,7 +209,12 @@
+ 	DRM_INFO("features: %ccontext_init\n",
+ 		 vgdev->has_context_init ? '+' : '-');
+ 
+-	ret = virtio_find_vqs(vgdev->vdev, 2, vqs, vqs_info, NULL);
++	/* AnyOS: the host's vblank queue is the third one (feature bit 20). */
++	vgdev->vblank.wanted = virtio_gpu_vblank_wanted(vgdev->vdev);
++	DRM_INFO("features: %canyos_vblank\n",
++		 vgdev->vblank.wanted ? '+' : '-');
++	ret = virtio_find_vqs(vgdev->vdev, vgdev->vblank.wanted ? 3 : 2, vqs,
++			      vqs_info, NULL);
+ 	if (ret) {
+ 		DRM_ERROR("failed to find virt queues\n");
+ 		goto err_vqs;
+@@ -245,7 +252,16 @@
+ 		goto err_scanouts;
+ 	}
+ 
++	if (vgdev->vblank.wanted && vgdev->num_scanouts) {
++		ret = virtio_gpu_vblank_init(vgdev, vqs[2]);
++		if (ret) {
++			DRM_ERROR("anyos vblank init failed\n");
++			goto err_scanouts;
++		}
++	}
++
+ 	virtio_device_ready(vgdev->vdev);
++	virtio_gpu_vblank_start(vgdev);
+ 
+ 	if (num_capsets)
+ 		virtio_gpu_get_capsets(vgdev, num_capsets);
+@@ -260,9 +276,11 @@
+ 	return 0;
+ 
+ err_scanouts:
++	virtio_gpu_vblank_stop(vgdev);
+ 	virtio_gpu_free_vbufs(vgdev);
+ err_vbufs:
+ 	vgdev->vdev->config->del_vqs(vgdev->vdev);
++	virtio_gpu_vblank_fini(vgdev);
+ err_vqs:
+ 	dev->dev_private = NULL;
+ 	return ret;
+@@ -286,8 +304,10 @@
+ 	flush_work(&vgdev->ctrlq.dequeue_work);
+ 	flush_work(&vgdev->cursorq.dequeue_work);
+ 	flush_work(&vgdev->config_changed_work);
++	virtio_gpu_vblank_stop(vgdev);
+ 	virtio_reset_device(vgdev->vdev);
+ 	vgdev->vdev->config->del_vqs(vgdev->vdev);
++	virtio_gpu_vblank_fini(vgdev);
+ }
+ 
+ void virtio_gpu_release(struct drm_device *dev)
+--- a/virtgpu_trace.h
++++ b/virtgpu_trace.h
+@@ -52,5 +52,6 @@
+ #endif
+ 
+ #undef TRACE_INCLUDE_PATH
+-#define TRACE_INCLUDE_PATH ../../drivers/gpu/drm/virtio
++/* AnyOS: built out of tree against the kernel headers (-I$(src)). */
++#define TRACE_INCLUDE_PATH .
+ #include <trace/define_trace.h>
+--- a/virtgpu_vblank.c
++++ b/virtgpu_vblank.c
+@@ -0,0 +1,396 @@
++// SPDX-License-Identifier: GPL-2.0 OR MIT
++/*
++ * Any OS: host-driven vblank (VIRTIO_GPU_F_ANYOS_VBLANK).
++ *
++ * The AnyOS engine's virtio-gpu offers feature bit 20 and a third virtqueue
++ * that completes one in-buffer per vblank of the Mac display the viewer
++ * window is on.  The stock 7.0 driver ticks from the DRM vblank timer: a
++ * guest hrtimer at the mode's rate with its own phase, which beats against
++ * the host's display link (a frame drawn twice and one skipped every few
++ * seconds when the two clocks drift).
++ *
++ * With the feature negotiated this file gives every scanout a DRM vblank
++ * that is phase-locked to the host's display:
++ *
++ *  - A guest hrtimer is the tick.  It runs at the mode's period and fires
++ *    at the estimated instants of the host's vblanks, so ticks are regular
++ *    even when the events reach the guest late (a host busy with GPU
++ *    commands adds milliseconds).
++ *  - Each host event re-phases the timer.  Its host timestamp plus the
++ *    smallest delivery offset seen (tracked with a slow decay, snapped on a
++ *    clock jump) is the vblank's instant on the guest clock; the timer is
++ *    moved to one period past it.  The offset is measured on the raw
++ *    monotonic clock: the host stamps its vblanks with the Mac's raw uptime
++ *    clock, the counter the guest's raw clock also reads, whereas
++ *    CLOCK_MONOTONIC runs at NTP's frequency correction (timesyncd's was
++ *    +331 ppm, faster than the floor can follow).  An
++ *    event whose slot the timer already served is folded; one the timer
++ *    missed (first events, a late expiry) ticks at once.
++ *  - Without host events (no viewer window, the Mac's display asleep) the
++ *    timer free-runs at the mode's rate: nothing downstream ever waits
++ *    for the host.
++ *
++ * The timer runs only while the DRM core has vblank enabled (a flip or a
++ * wait in flight, plus its off-delay); while disabled the event buffers
++ * are held back, so the host drops its events and the guest sleeps.
++ */
++#include <linux/hrtimer.h>
++#include <linux/ktime.h>
++#include <linux/moduleparam.h>
++#include <linux/scatterlist.h>
++#include <linux/virtio.h>
++
++#include <drm/drm_print.h>
++#include <drm/drm_vblank.h>
++
++#include "virtgpu_drv.h"
++
++/*
++ * virtio_gpu.anyos_vblank=0 turns the host-driven vblank off; off, the queue
++ * stays unused and the driver behaves like the stock one (page flips
++ * complete at commit time, Present's UST/MSC stay 0).  On by default since
++ * 2026-09-23: the GNOME Shell stalls (0.4-16 s) seen with three presenters
++ * were Mesa's DRI3 target-MSC arithmetic in the X11 compositor once MSC is
++ * real, not lost ticks -- ticks and flip events kept flowing while the
++ * compositor sent no frame; install.sh adds a drirc entry that turns
++ * vblank_mode off for gnome-shell only (the kernel still syncs its flips).
++ */
++static bool virtio_gpu_anyos_vblank_param = true;
++module_param_named(anyos_vblank, virtio_gpu_anyos_vblank_param, bool, 0444);
++MODULE_PARM_DESC(anyos_vblank,
++		 "Host-driven vblank from the Any OS engine (default: Y)");
++
++bool virtio_gpu_vblank_wanted(struct virtio_device *vdev)
++{
++	return virtio_gpu_anyos_vblank_param &&
++	       virtio_has_feature(vdev, VIRTIO_GPU_F_ANYOS_VBLANK);
++}
++
++/* Lock held. Marks the slot served; the caller delivers after unlocking. */
++static bool virtio_gpu_vblank_claim(struct virtio_gpu_vblank *vb, s64 slot_ns)
++{
++	if (vb->last_tick_ns && slot_ns - vb->last_tick_ns < vb->period_ns / 2) {
++		vb->coalesced++;
++		return false;
++	}
++	vb->last_tick_ns = slot_ns;
++	return true;
++}
++
++/* Every scanout ticks; the core drops ticks for CRTCs whose vblank is off. */
++static void virtio_gpu_vblank_deliver(struct virtio_gpu_device *vgdev)
++{
++	struct virtio_gpu_vblank *vb = &vgdev->vblank;
++	s64 now = ktime_get_ns();
++	int i;
++
++	/* Diagnostics: the longest silence between delivered ticks. */
++	if (vb->last_delivered_ns && now - vb->last_delivered_ns > vb->max_tick_gap_ns)
++		vb->max_tick_gap_ns = now - vb->last_delivered_ns;
++	vb->last_delivered_ns = now;
++	for (i = 0; i < vgdev->num_scanouts; i++)
++		drm_crtc_handle_vblank(&vgdev->outputs[i].crtc);
++}
++
++/* Lock held: (re)arm the timer for the slot in next_ns. */
++static void virtio_gpu_vblank_arm(struct virtio_gpu_vblank *vb)
++{
++	if (!vb->enabled || !vb->running)
++		return;
++	hrtimer_start(&vb->timer, ns_to_ktime(vb->next_ns), HRTIMER_MODE_ABS);
++}
++
++static enum hrtimer_restart virtio_gpu_vblank_expire(struct hrtimer *timer)
++{
++	struct virtio_gpu_device *vgdev =
++		container_of(timer, struct virtio_gpu_device, vblank.timer);
++	struct virtio_gpu_vblank *vb = &vgdev->vblank;
++	unsigned long flags;
++	bool tick = false;
++	s64 now;
++
++	spin_lock_irqsave(&vb->lock, flags);
++	if (vb->enabled && vb->running) {
++		now = ktime_get_ns();
++		/*
++		 * next_ns is the next unserved slot.  A host event that came
++		 * in while this expiry was pending has already moved it into
++		 * the future; then there is nothing to serve yet.
++		 */
++		if (now >= vb->next_ns - vb->period_ns / 8) {
++			tick = virtio_gpu_vblank_claim(vb, vb->next_ns);
++			if (tick)
++				vb->timer_ticks++;
++			/*
++			 * Phase-locked: the next slot follows the scheduled
++			 * one, not this expiry.  A slot missed by a whole
++			 * period (the CPU was away) is skipped, not bunched.
++			 */
++			vb->next_ns += vb->period_ns;
++			if (vb->next_ns <= now) {
++				vb->timer_late++;
++				vb->next_ns += ((now - vb->next_ns) / vb->period_ns + 1) *
++					       vb->period_ns;
++			}
++		} else {
++			vb->timer_early++;
++		}
++		virtio_gpu_vblank_arm(vb);
++	}
++	spin_unlock_irqrestore(&vb->lock, flags);
++	if (tick)
++		virtio_gpu_vblank_deliver(vgdev);
++	return HRTIMER_NORESTART;
++}
++
++/* Lock held. */
++static void virtio_gpu_vblank_post(struct virtio_gpu_vblank *vb,
++				   struct anyos_vblank_event *event)
++{
++	struct scatterlist sg;
++
++	sg_init_one(&sg, event, sizeof(*event));
++	if (virtqueue_add_inbuf(vb->vq, &sg, 1, event, GFP_ATOMIC))
++		vb->post_failures++;
++	else
++		vb->posted++;
++}
++
++/*
++ * Lock held: a host vblank with the given host timestamp reached the guest
++ * at `now` (CLOCK_MONOTONIC), `now_raw` on the raw clock.  Returns true
++ * when the guest must tick for it (its slot was not served by the timer).
++ */
++static bool virtio_gpu_vblank_host_event(struct virtio_gpu_vblank *vb,
++					 s64 host_ns, s64 now, s64 now_raw)
++{
++	s64 offset = now_raw - host_ns, slot_ns, error;
++
++	/*
++	 * The guest-minus-host clock offset: its floor is the smallest
++	 * delivery latency.  It follows a drop at once, creeps up by 1/4096
++	 * period per event (a permanently slower path: a 2 ms shift is
++	 * followed in ~8 s at 120 Hz), and snaps on a jump of over four
++	 * periods (a clock discontinuity, a long stall).
++	 */
++	if (!vb->offset_valid || offset < vb->offset_ns ||
++	    offset - vb->offset_ns > 4 * vb->period_ns) {
++		if (vb->offset_valid && offset > vb->offset_ns)
++			vb->offset_snaps++;
++		vb->offset_ns = offset;
++		vb->offset_valid = true;
++	} else {
++		vb->offset_ns += min(offset - vb->offset_ns, vb->period_ns / 4096);
++	}
++	/* The slot on the raw clock, then on CLOCK_MONOTONIC (the timer's). */
++	slot_ns = now - (now_raw - (host_ns + vb->offset_ns));
++	if (now - slot_ns > vb->max_delivery_ns)
++		vb->max_delivery_ns = now - slot_ns;
++	/* The timer's phase error against this vblank, before re-phasing. */
++	error = vb->next_ns - vb->period_ns - slot_ns;
++	if (error < 0)
++		error = -error;
++	if (error > vb->max_phase_error_ns)
++		vb->max_phase_error_ns = error;
++	vb->next_ns = slot_ns + vb->period_ns;
++	if (vb->next_ns <= now)
++		vb->next_ns += ((now - vb->next_ns) / vb->period_ns + 1) *
++			       vb->period_ns;
++	virtio_gpu_vblank_arm(vb);
++	if (virtio_gpu_vblank_claim(vb, slot_ns)) {
++		vb->host_ticks++;
++		return true;
++	}
++	vb->folded++;
++	return false;
++}
++
++/* Virtqueue callback: one completed in-buffer per host vblank. IRQ context. */
++void virtio_gpu_vblank_ack(struct virtqueue *vq)
++{
++	struct drm_device *dev = vq->vdev->priv;
++	struct virtio_gpu_device *vgdev = dev->dev_private;
++	struct virtio_gpu_vblank *vb = &vgdev->vblank;
++	struct anyos_vblank_event *event;
++	unsigned int len, ticks = 0;
++	unsigned long flags;
++	bool reposted = false;
++
++	spin_lock_irqsave(&vb->lock, flags);
++	while ((event = virtqueue_get_buf(vq, &len))) {
++		s64 now_raw = ktime_get_raw_ns(), now = ktime_get_ns();
++
++		vb->received++;
++		if (len >= sizeof(*event)) {
++			u32 interval_us = le32_to_cpu(event->interval_us);
++
++			if (interval_us >= 1000 && interval_us <= 100000)
++				vb->host_interval_ns = (s64)interval_us * NSEC_PER_USEC;
++			if (vb->running &&
++			    virtio_gpu_vblank_host_event(vb, le64_to_cpu(event->host_time_ns),
++							 now, now_raw))
++				ticks++;
++		} else {
++			vb->short_events++;
++		}
++		/* Held back while the core has vblank disabled (see enable). */
++		if (vb->running) {
++			virtio_gpu_vblank_post(vb, event);
++			reposted = true;
++		} else {
++			vb->held[vb->held_count++] = event;
++		}
++	}
++	if (reposted)
++		virtqueue_kick(vq);
++	spin_unlock_irqrestore(&vb->lock, flags);
++	while (ticks--)
++		virtio_gpu_vblank_deliver(vgdev);
++}
++
++/*
++ * A scanout's mode changed: the tick runs at the mode's refresh rate. The
++ * host's events re-phase it; their own interval is only reported.
++ */
++void virtio_gpu_vblank_set_mode(struct virtio_gpu_device *vgdev,
++				const struct drm_display_mode *mode)
++{
++	struct virtio_gpu_vblank *vb = &vgdev->vblank;
++	int vrefresh = mode ? drm_mode_vrefresh(mode) : 0;
++	unsigned long flags;
++
++	if (vrefresh < 10 || vrefresh > 1000)
++		vrefresh = 60;
++	spin_lock_irqsave(&vb->lock, flags);
++	vb->period_ns = NSEC_PER_SEC / vrefresh;
++	vb->offset_valid = false;
++	if (vb->running) {
++		vb->next_ns = ktime_get_ns() + vb->period_ns;
++		virtio_gpu_vblank_arm(vb);
++	}
++	spin_unlock_irqrestore(&vb->lock, flags);
++}
++
++/* drm_crtc_funcs.enable_vblank: the core wants ticks (a flip or a wait). */
++int virtio_gpu_vblank_enable(struct drm_crtc *crtc)
++{
++	struct virtio_gpu_device *vgdev = crtc->dev->dev_private;
++	struct virtio_gpu_vblank *vb = &vgdev->vblank;
++	unsigned long flags;
++
++	if (!vb->enabled)
++		return -EINVAL;
++	spin_lock_irqsave(&vb->lock, flags);
++	vb->running_crtcs |= BIT(drm_crtc_index(crtc));
++	if (!vb->running) {
++		vb->running = true;
++		vb->offset_valid = false;
++		vb->last_tick_ns = 0;
++		vb->last_delivered_ns = 0;
++		vb->next_ns = ktime_get_ns() + vb->period_ns;
++		while (vb->held_count)
++			virtio_gpu_vblank_post(vb, vb->held[--vb->held_count]);
++		virtqueue_kick(vb->vq);
++		virtio_gpu_vblank_arm(vb);
++		vb->enables++;
++	}
++	spin_unlock_irqrestore(&vb->lock, flags);
++	return 0;
++}
++
++/* drm_crtc_funcs.disable_vblank (vblank_time_lock held, IRQs off). */
++void virtio_gpu_vblank_disable(struct drm_crtc *crtc)
++{
++	struct virtio_gpu_device *vgdev = crtc->dev->dev_private;
++	struct virtio_gpu_vblank *vb = &vgdev->vblank;
++	unsigned long flags;
++
++	spin_lock_irqsave(&vb->lock, flags);
++	/*
++	 * One timer ticks every CRTC: it stops only when no CRTC wants
++	 * vblanks, or a head with a flip in flight would never see its event.
++	 */
++	vb->running_crtcs &= ~BIT(drm_crtc_index(crtc));
++	if (vb->running && !vb->running_crtcs) {
++		vb->running = false;
++		/* Non-blocking; a running expiry sees running == false. */
++		hrtimer_try_to_cancel(&vb->timer);
++	}
++	spin_unlock_irqrestore(&vb->lock, flags);
++}
++
++/*
++ * Called from virtio_gpu_init once the queues are found and the CRTCs exist
++ * (with DRM vblank support, registered by virtio_gpu_modeset_init), before
++ * drm_dev_register: posts the event buffers.
++ */
++int virtio_gpu_vblank_init(struct virtio_gpu_device *vgdev,
++			   struct virtqueue *vq)
++{
++	struct virtio_gpu_vblank *vb = &vgdev->vblank;
++	int i;
++
++	if (!vgdev->num_scanouts)
++		return 0;
++	/*
++	 * The lock and the timer first: once events is set, every failure
++	 * below reaches virtio_gpu_vblank_fini, which cancels the timer.
++	 */
++	spin_lock_init(&vb->lock);
++	hrtimer_setup(&vb->timer, virtio_gpu_vblank_expire, CLOCK_MONOTONIC,
++		      HRTIMER_MODE_ABS);
++	vb->events = kcalloc(VIRTIO_GPU_ANYOS_VBLANK_BUFFERS,
++			     sizeof(*vb->events), GFP_KERNEL);
++	if (!vb->events)
++		return -ENOMEM;
++	/* virtio_gpu_modeset_init has called drm_vblank_init. */
++	vb->vq = vq;
++	vb->period_ns = NSEC_PER_SEC / 60;
++	spin_lock_irq(&vb->lock);
++	for (i = 0; i < VIRTIO_GPU_ANYOS_VBLANK_BUFFERS; i++)
++		virtio_gpu_vblank_post(vb, &vb->events[i]);
++	vb->enabled = true;
++	spin_unlock_irq(&vb->lock);
++	DRM_INFO("anyos vblank: host-driven vblank on %d scanout(s)\n",
++		 vgdev->num_scanouts);
++	return 0;
++}
++
++/* After virtio_device_ready: let the device see the posted buffers. */
++void virtio_gpu_vblank_start(struct virtio_gpu_device *vgdev)
++{
++	struct virtio_gpu_vblank *vb = &vgdev->vblank;
++
++	if (!vb->enabled)
++		return;
++	spin_lock_irq(&vb->lock);
++	virtqueue_kick(vb->vq);
++	spin_unlock_irq(&vb->lock);
++}
++
++/* Before the device is reset and its queues deleted. */
++void virtio_gpu_vblank_stop(struct virtio_gpu_device *vgdev)
++{
++	struct virtio_gpu_vblank *vb = &vgdev->vblank;
++
++	if (!vb->enabled)
++		return;
++	spin_lock_irq(&vb->lock);
++	vb->enabled = false;
++	vb->running = false;
++	vb->running_crtcs = 0;
++	spin_unlock_irq(&vb->lock);
++	hrtimer_cancel(&vb->timer);
++}
++
++/* After del_vqs: nothing references the event buffers any more. */
++void virtio_gpu_vblank_fini(struct virtio_gpu_device *vgdev)
++{
++	struct virtio_gpu_vblank *vb = &vgdev->vblank;
++
++	if (vb->events)
++		hrtimer_cancel(&vb->timer);
++	kfree(vb->events);
++	vb->events = NULL;
++	vb->vq = NULL;
++}

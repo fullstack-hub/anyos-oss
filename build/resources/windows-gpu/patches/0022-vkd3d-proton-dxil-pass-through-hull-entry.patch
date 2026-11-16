@@ -1,0 +1,39 @@
+vkd3d-proton: accept a DXIL hull shader with an implicit pass-through control point phase
+
+A driver that reports shader model 6 receives every fxc (DXBC) shader from
+the D3D12 runtime converted to DXIL.  A hull shader whose control point phase
+only copies its inputs (fxc drops that phase) comes out with dx.entryPoints
+{null, ""}: no entry function and no name.  dxil-spirv converts it (it
+synthesizes the pass-through), but vkd3d_shader_compile_dxil() failed the
+whole shader with VKD3D_ERROR_INVALID_SHADER when it could not read an entry
+name for its quirk lookup, so every tessellation PSO through the AnyOS D3D12
+UMD reported DXGI_ERROR_DEVICE_REMOVED.  Without a name the quirk lookup
+matches by hash only.
+
+diff --git a/libs/vkd3d-shader/dxil.c b/libs/vkd3d-shader/dxil.c
+index 6bf14fa..148a460 100644
+--- a/libs/vkd3d-shader/dxil.c
++++ b/libs/vkd3d-shader/dxil.c
+@@ -1477,10 +1477,20 @@ int vkd3d_shader_compile_dxil(const struct vkd3d_shader_code *dxbc,
+         goto end;
+     }
+ 
++    /* A hull shader whose control point phase is an implicit pass-through
++     * has no entry function: the D3D12 runtime's DXBC->DXIL conversion
++     * (what a driver advertising SM 6 receives for every fxc shader) lists
++     * it in dx.entryPoints with a null function and an empty name.  The
++     * converter handles it (it synthesizes the pass-through); only the
++     * quirk lookup has no name to match. */
+     if (dxil_spv_parsed_blob_get_entry_point_demangled_name(blob, 0, &quirk_entry) != DXIL_SPV_SUCCESS)
+     {
+-        ret = VKD3D_ERROR_INVALID_SHADER;
+-        goto end;
++        if (dxil_spv_parsed_blob_get_shader_stage(blob) != DXIL_SPV_STAGE_HULL)
++        {
++            ret = VKD3D_ERROR_INVALID_SHADER;
++            goto end;
++        }
++        quirk_entry = NULL;
+     }
+ 
+     quirks = vkd3d_shader_compile_arguments_select_quirks(compiler_args, hash, quirk_entry);
