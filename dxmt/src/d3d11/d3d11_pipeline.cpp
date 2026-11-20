@@ -39,11 +39,13 @@ public:
     }
 
     if (pDesc->PixelShader) {
-      PixelShader = pDesc->PixelShader->get_shader(ShaderVariantPixel{
+      ShaderVariantPixel ps_variant{
           pDesc->SampleMask, pDesc->BlendState->IsDualSourceBlending(),
           depth_stencil_format == WMTPixelFormatInvalid,
           unorm_output_reg_mask, uint_output_reg_mask,
-          sint_output_reg_mask});
+          sint_output_reg_mask};
+      ps_variant.forced_coverage_mask = pDesc->ForcedCoverageMask; // AnyOS
+      PixelShader = pDesc->PixelShader->get_shader(ps_variant);
       ps_valid_render_targets = pDesc->PixelShader->reflection().PSValidRenderTargets;
       ps_uint_output_registers = pDesc->PixelShader->reflection().PSUintOutputRegisterMask;
       ps_sint_output_registers = pDesc->PixelShader->reflection().PSSintOutputRegisterMask;

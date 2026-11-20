@@ -1,0 +1,42 @@
+dynconfig: directories from the environment for a relocatable install
+
+Samba compiles every directory it uses (modules, codepages, the private
+libraries' rpath aside) into the binaries, and smb.conf can override only
+the state directories. An application that ships Samba inside its own
+bundle cannot know the install path at build time, so a dyn config value
+that is still its compiled default is taken from SAMBA_DYN_<NAME>
+(SAMBA_DYN_MODULESDIR, SAMBA_DYN_CODEPAGEDIR, ...) the first time it is
+read. The environment is the launching application's; smbd runs as that
+user, never set-uid, in this use. samba-dcerpcd read the libexec
+directory through the variable instead of its accessor and so found the
+rpcd_* workers at the compiled-in path; it goes through the accessor.
+
+--- a/dynconfig/dynconfig.c
++++ b/dynconfig/dynconfig.c
+@@ -55,6 +55,15 @@
+ \
+ const char *get_dyn_##name(void) \
+ {\
++	/* AnyOS: a relocatable install names its directories through the \
++	 * environment (SAMBA_DYN_<NAME>), taken once, before anything set \
++	 * the value. */ \
++	if (is_default_dyn_##name()) { \
++		const char *env = getenv("SAMBA_DYN_" #name); \
++		if (env != NULL && *env != '\0') { \
++			set_dyn_##name(env); \
++		} \
++	} \
+ 	return dyn_##name;\
+ }\
+ \
+--- a/source3/rpc_server/rpc_host.c
++++ b/source3/rpc_server/rpc_host.c
+@@ -2829,7 +2829,7 @@
+ 
+ 	if (libexec_rpcds != 0) {
+ 		ret = rpc_host_list_servers(
+-			dyn_SAMBA_LIBEXECDIR, frame, &servers);
++			get_dyn_SAMBA_LIBEXECDIR(), frame, &servers);
+ 		if (ret != 0) {
+ 			DBG_ERR("Could not list libexec: %s\n",
+ 				strerror(ret));

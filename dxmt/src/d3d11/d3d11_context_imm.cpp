@@ -342,6 +342,13 @@ public:
       break;
     }
     default:
+      if (IsStreamOutputQuery(desc.Query)) {
+        if (auto query = static_cast<MTLD3D11StreamOutputQuery *>(pAsync)->Begin())
+          EmitST([query = Rc(query)](ArgumentEncodingContext &enc) mutable {
+            enc.beginStreamOutputQuery(std::move(query));
+          });
+        break;
+      }
       ERR("Unknown query type ", desc.Query);
       break;
     }
@@ -399,6 +406,24 @@ public:
       break;
     }
     default:
+      if (IsStreamOutputQuery(desc.Query)) {
+        // AnyOS: the counters are final once the event after the bracket is signaled
+        uint64_t event_id;
+        if (ctx_state.has_dirty_op_since_last_event) {
+          event_id = cmd_queue.GetNextEventSeqId();
+          InvalidateCurrentPass(true);
+          EmitOP([event_id](ArgumentEncodingContext &enc) mutable { enc.signalEvent(event_id); });
+          ctx_state.has_dirty_op_since_last_event = false;
+        } else {
+          event_id = cmd_queue.GetCurrentEventSeqId();
+        }
+        auto query = static_cast<MTLD3D11StreamOutputQuery *>(pAsync)->End(event_id);
+        EmitST([query = Rc(query)](ArgumentEncodingContext &enc) mutable {
+          enc.endStreamOutputQuery(std::move(query));
+        });
+        promote_flush = true;
+        break;
+      }
       ERR("Unknown query type ", desc.Query);
       break;
     }
@@ -475,6 +500,12 @@ public:
       return S_OK;
     }
     default:
+      if (IsStreamOutputQuery(desc.Query)) {
+        hr = static_cast<MTLD3D11StreamOutputQuery *>(pAsync)->GetData(pData, cmd_queue.SignaledEventSeqId());
+        if (hr == DXGI_ERROR_INVALID_CALL)
+          return hr;
+        break;
+      }
       ERR("Unknown query type ", desc.Query);
       return E_FAIL;
     }
