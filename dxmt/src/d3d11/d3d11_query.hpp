@@ -182,38 +182,4 @@ HRESULT CreateTimestampQuery(MTLD3D11Device *pDevice,
                               const D3D11_QUERY_DESC1 *pDesc,
                               ID3D11Query1 **ppQuery);
 
-/* AnyOS: SO_STATISTICS(_STREAMn) and SO_OVERFLOW_PREDICATE(_STREAMn).  Only
- * stream 0 exists (domain-shader stream output); the other streams read 0. */
-class MTLD3D11StreamOutputQuery : public ID3D11Query1 {
-public:
-  /* the accumulator to make active, or nullptr (another stream) */
-  virtual StreamOutputQuery *Begin() = 0;
-  /* the accumulator to deactivate; data is ready once `event_seq_id` is signaled */
-  virtual StreamOutputQuery *End(uint64_t event_seq_id) = 0;
-  virtual HRESULT GetData(void *data, uint64_t signaled_event_seq_id) = 0;
-};
-
-HRESULT CreateStreamOutputQuery(MTLD3D11Device *pDevice,
-                                const D3D11_QUERY_DESC1 *pDesc,
-                                ID3D11Query1 **ppQuery);
-
-inline bool
-IsStreamOutputQuery(D3D11_QUERY query) {
-  switch (query) {
-  case D3D11_QUERY_SO_STATISTICS:
-  case D3D11_QUERY_SO_OVERFLOW_PREDICATE:
-  case D3D11_QUERY_SO_STATISTICS_STREAM0:
-  case D3D11_QUERY_SO_OVERFLOW_PREDICATE_STREAM0:
-  case D3D11_QUERY_SO_STATISTICS_STREAM1:
-  case D3D11_QUERY_SO_OVERFLOW_PREDICATE_STREAM1:
-  case D3D11_QUERY_SO_STATISTICS_STREAM2:
-  case D3D11_QUERY_SO_OVERFLOW_PREDICATE_STREAM2:
-  case D3D11_QUERY_SO_STATISTICS_STREAM3:
-  case D3D11_QUERY_SO_OVERFLOW_PREDICATE_STREAM3:
-    return true;
-  default:
-    return false;
-  }
-}
-
 } // namespace dxmt
