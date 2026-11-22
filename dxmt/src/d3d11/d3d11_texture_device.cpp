@@ -514,7 +514,14 @@ HRESULT CreateDeviceTextureInternal(MTLD3D11Device *pDevice,
   flags.set(finalDesc.CPUAccessFlags ? TextureAllocationFlag::GpuManaged : TextureAllocationFlag::GpuPrivate);
   if (!(finalDesc.BindFlags & (D3D11_BIND_UNORDERED_ACCESS | D3D11_BIND_RENDER_TARGET | D3D11_BIND_DEPTH_STENCIL)))
     flags.set(TextureAllocationFlag::ShaderReadonly);
-  if (finalDesc.Usage == D3D11_USAGE_IMMUTABLE)
+  /* GpuReadonly is NoTracking: no encoder waits for a write to the
+   * allocation.  That holds only when the contents come with the create call
+   * (the initializer queue, which every chunk waits for).  An IMMUTABLE texture
+   * created empty is filled afterwards by UpdateSubresource, a blit on the
+   * command stream (the native embedder delivers a guest's initial data this
+   * way), so the blits and draws reading it need the fences a DEFAULT texture
+   * gets; without them Metal may run a reader before the upload. */
+  if (finalDesc.Usage == D3D11_USAGE_IMMUTABLE && pInitialData)
     flags.set(TextureAllocationFlag::GpuReadonly);
   if (single_subresource && (finalDesc.BindFlags & D3D11_BIND_DEPTH_STENCIL)) {
     Rc<RenamableTexturePool> renamable = new RenamableTexturePool(texture.ptr(), 32, flags);
