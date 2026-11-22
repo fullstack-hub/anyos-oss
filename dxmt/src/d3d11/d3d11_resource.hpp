@@ -1,5 +1,6 @@
 #pragma once
 #include "dxmt_buffer.hpp"
+#include "dxmt_counter.hpp"
 #include "dxmt_dynamic.hpp"
 #include "dxmt_staging.hpp"
 #include "dxmt_texture.hpp"
@@ -137,6 +138,15 @@ struct D3D11ResourceCommon : ID3D11Resource {
   Rc<Buffer> buffer_{};
   Rc<Texture> texture_{};
   uint32_t bind_flags_{};
+  /* AnyOS: BufferFilledSize of a stream-output buffer (bytes), a GPU counter */
+  Rc<Counter> so_filled_size_{};
+
+  const Rc<Counter> &
+  soFilledSize() {
+    if (!so_filled_size_)
+      so_filled_size_ = new Counter();
+    return so_filled_size_;
+  }
 
   const Rc<Buffer> &buffer() const {
     return buffer_;
