@@ -547,15 +547,6 @@ struct Converter::Impl
 		ResourceMetaInstrumentation instrumentation;
 	};
 	UnorderedMap<spv::Id, ResourceMeta> handle_to_resource_meta;
-	// AnyOS: the global variable and index behind each descriptor access chain
-	// (resource pointer) built by build_load_resource_handle(). Sampler feedback
-	// writes reference the global directly so that MSL access deduction sees them.
-	struct ResourceAccessChainBase
-	{
-		spv::Id base_var_id;
-		spv::Id index_id;
-	};
-	UnorderedMap<spv::Id, ResourceAccessChainBase> resource_access_chain_base;
 	UnorderedMap<spv::Id, spv::Id> id_to_type;
 	UnorderedMap<const llvm::Value *, unsigned> handle_to_root_member_offset;
 	UnorderedMap<const llvm::Value *, spv::StorageClass> handle_to_storage_class;

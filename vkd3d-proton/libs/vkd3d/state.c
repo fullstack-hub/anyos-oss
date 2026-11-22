@@ -4443,7 +4443,6 @@ vkd3d_dynamic_state_list[] =
     { VKD3D_DYNAMIC_STATE_DEPTH_BIAS,            VK_DYNAMIC_STATE_DEPTH_BIAS },
     { VKD3D_DYNAMIC_STATE_DEPTH_BIAS,            VK_DYNAMIC_STATE_DEPTH_BIAS_ENABLE },
     { VKD3D_DYNAMIC_STATE_RASTERIZATION_SAMPLES, VK_DYNAMIC_STATE_RASTERIZATION_SAMPLES_EXT },
-    { VKD3D_DYNAMIC_STATE_SAMPLE_LOCATIONS,      VK_DYNAMIC_STATE_SAMPLE_LOCATIONS_EXT },
 };
 
 uint32_t vkd3d_init_dynamic_state_array(VkDynamicState *dynamic_states, uint32_t dynamic_state_flags)
@@ -4754,18 +4753,6 @@ static bool d3d12_graphics_pipeline_needs_dynamic_rasterization_samples(const st
             (graphics->null_attachment_mask & dsv_attachment_mask(graphics));
 }
 
-static bool d3d12_graphics_pipeline_uses_sample_locations(struct d3d12_device *device,
-        const struct d3d12_graphics_pipeline_state *graphics, const struct vkd3d_pipeline_key *key)
-{
-    VkSampleCountFlagBits samples;
-
-    if (device->d3d12_caps.options2.ProgrammableSamplePositionsTier == D3D12_PROGRAMMABLE_SAMPLE_POSITIONS_TIER_NOT_SUPPORTED)
-        return false;
-    samples = key && key->rasterization_samples ? key->rasterization_samples : graphics->ms_desc.rasterizationSamples;
-    return samples > VK_SAMPLE_COUNT_1_BIT &&
-            (device->device_info.sample_locations_properties.sampleLocationSampleCounts & samples);
-}
-
 uint32_t d3d12_graphics_pipeline_state_get_dynamic_state_flags(struct d3d12_pipeline_state *state,
         const struct vkd3d_pipeline_key *key)
 {
@@ -4837,16 +4824,9 @@ uint32_t d3d12_graphics_pipeline_state_get_dynamic_state_flags(struct d3d12_pipe
     if (graphics->index_buffer_strip_cut_value && !is_mesh_pipeline)
         dynamic_state_flags |= VKD3D_DYNAMIC_STATE_PRIMITIVE_RESTART;
 
-    /* SetSamplePositions is command list state: multisampled pipelines take dynamic
-     * sample locations, which the command list sets to the D3D12 standard pattern
-     * until the application programs its own.  The per-pixel location count must
-     * equal the rasterization count, so these pipelines keep a static count and a
-     * render target of another count takes the sample count variant instead. */
-    if (d3d12_graphics_pipeline_uses_sample_locations(state->device, graphics, key))
-        dynamic_state_flags |= VKD3D_DYNAMIC_STATE_SAMPLE_LOCATIONS;
     /* Enable dynamic sample count for multisampled pipelines so we can work around
      * bugs where the app may render to a single sampled render target. */
-    else if (d3d12_graphics_pipeline_needs_dynamic_rasterization_samples(&state->graphics) &&
+    if (d3d12_graphics_pipeline_needs_dynamic_rasterization_samples(&state->graphics) &&
             state->device->device_info.extended_dynamic_state3_features.extendedDynamicState3RasterizationSamples)
         dynamic_state_flags |= VKD3D_DYNAMIC_STATE_RASTERIZATION_SAMPLES;
 
@@ -6859,7 +6839,6 @@ VkPipeline d3d12_pipeline_state_create_pipeline_variant(struct d3d12_pipeline_st
     VkPipelineTessellationStateCreateInfo tessellation_info;
     bool has_vertex_input_state, has_fragment_output_state;
     VkPipelineCreationFeedbackCreateInfoEXT feedback_info;
-    VkPipelineSampleLocationsStateCreateInfoEXT sample_locations_info;
     VkPipelineMultisampleStateCreateInfo multisample_info;
     VkPipelineDynamicStateCreateInfo dynamic_create_info;
     struct vkd3d_queue_timeline_trace_cookie cookie;
@@ -6948,16 +6927,6 @@ VkPipeline d3d12_pipeline_state_create_pipeline_variant(struct d3d12_pipeline_st
 
         if (key && key->rasterization_samples)
             multisample_info.rasterizationSamples = key->rasterization_samples;
-
-        if (*dynamic_state_flags & VKD3D_DYNAMIC_STATE_SAMPLE_LOCATIONS)
-        {
-            /* Locations come from vkCmdSetSampleLocationsEXT. */
-            memset(&sample_locations_info, 0, sizeof(sample_locations_info));
-            sample_locations_info.sType = VK_STRUCTURE_TYPE_PIPELINE_SAMPLE_LOCATIONS_STATE_CREATE_INFO_EXT;
-            sample_locations_info.sampleLocationsEnable = VK_TRUE;
-            sample_locations_info.sampleLocationsInfo.sType = VK_STRUCTURE_TYPE_SAMPLE_LOCATIONS_INFO_EXT;
-            vk_prepend_struct(&multisample_info, &sample_locations_info);
-        }
 
         pipeline_desc.pMultisampleState = &multisample_info;
     }
@@ -7841,32 +7810,6 @@ static bool vkd3d_bindless_supports_mutable_type(struct d3d12_device *device, ui
     return supported.supported == VK_TRUE;
 }
 
-/* AnyOS: size the per-type Vulkan descriptor sets that back a CBV_SRV_UAV
- * heap from the device's update-after-bind limits instead of assuming the
- * D3D12 tier-2 heap size.  MoltenVK has 31 buffers and 128 images per stage
- * on direct Metal bindings and 1M with Metal argument buffers (the gfxstream
- * host turns those on per instance for vkd3d, ANYOS_MVK_ARGUMENT_BUFFERS);
- * the same UMD binary must work on both.  Descriptor buffers and descriptor
- * heaps size themselves from their own properties and ignore this. */
-static void vkd3d_bindless_state_init_limits(struct vkd3d_bindless_state *bindless_state,
-        struct d3d12_device *device)
-{
-    const VkPhysicalDeviceVulkan12Properties *limits = &device->device_info.vulkan_1_2_properties;
-    uint32_t count = VKD3D_MAX_VIEW_DESCRIPTOR_COUNT;
-
-    count = min(count, limits->maxPerStageDescriptorUpdateAfterBindSampledImages);
-    count = min(count, limits->maxPerStageDescriptorUpdateAfterBindStorageImages);
-    count = min(count, limits->maxPerStageDescriptorUpdateAfterBindStorageBuffers);
-    count = min(count, limits->maxDescriptorSetUpdateAfterBindSampledImages);
-    count = min(count, limits->maxDescriptorSetUpdateAfterBindStorageImages);
-    count = min(count, limits->maxDescriptorSetUpdateAfterBindStorageBuffers);
-    bindless_state->max_view_descriptors = max(count, VKD3D_MIN_VIEW_DESCRIPTOR_COUNT);
-
-    if (bindless_state->max_view_descriptors < VKD3D_MAX_VIEW_DESCRIPTOR_COUNT)
-        INFO("Device backs at most %u view descriptors per heap (D3D12 tier 2 wants %u).\n",
-                bindless_state->max_view_descriptors, VKD3D_MAX_VIEW_DESCRIPTOR_COUNT);
-}
-
 static uint32_t vkd3d_bindless_state_get_bindless_flags(struct d3d12_device *device)
 {
     const struct vkd3d_physical_device_info *device_info = &device->device_info;
@@ -7874,7 +7817,7 @@ static uint32_t vkd3d_bindless_state_get_bindless_flags(struct d3d12_device *dev
 
     if (!d3d12_device_uses_descriptor_buffers(device))
     {
-        if (device_info->vulkan_1_2_properties.maxPerStageDescriptorUpdateAfterBindUniformBuffers < device->bindless_state.max_view_descriptors ||
+        if (device_info->vulkan_1_2_properties.maxPerStageDescriptorUpdateAfterBindUniformBuffers < VKD3D_MIN_VIEW_DESCRIPTOR_COUNT ||
                 !device_info->vulkan_1_2_features.descriptorBindingUniformBufferUpdateAfterBind ||
                 !device_info->vulkan_1_2_features.shaderUniformBufferArrayNonUniformIndexing)
             flags |= VKD3D_BINDLESS_CBV_AS_SSBO;
@@ -7919,8 +7862,7 @@ static uint32_t vkd3d_bindless_state_get_bindless_flags(struct d3d12_device *dev
      * which is great. */
     if (VKD3D_CONFIG_FLAG_IS_SET(FORCE_RAW_VA_CBV) ||
             (device_info->properties2.properties.vendorID != VKD3D_VENDOR_ID_NVIDIA &&
-             device_info->properties2.properties.vendorID != VKD3D_VENDOR_ID_QUALCOMM &&
-             device_info->vulkan_1_2_properties.driverID != VK_DRIVER_ID_MOLTENVK))
+	     device_info->properties2.properties.vendorID != VKD3D_VENDOR_ID_QUALCOMM))
         flags |= VKD3D_RAW_VA_ROOT_DESCRIPTOR_CBV;
 
     if (device_info->properties2.properties.vendorID == VKD3D_VENDOR_ID_NVIDIA &&
@@ -8251,7 +8193,6 @@ static HRESULT vkd3d_bindless_state_init_legacy(struct vkd3d_bindless_state *bin
     uint32_t extra_bindings = 0;
     HRESULT hr = E_FAIL;
 
-    vkd3d_bindless_state_init_limits(bindless_state, device);
     bindless_state->flags = vkd3d_bindless_state_get_bindless_flags(device);
 
     if (!d3d12_device_uses_descriptor_buffers(device))

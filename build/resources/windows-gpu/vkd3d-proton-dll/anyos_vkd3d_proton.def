@@ -1,6 +1,0 @@
-LIBRARY anyos_vkd3d_proton.dll
-EXPORTS
-    vkd3d_create_instance
-    vkd3d_create_device
-    vkd3d_serialize_root_signature
-    vkd3d_serialize_versioned_root_signature

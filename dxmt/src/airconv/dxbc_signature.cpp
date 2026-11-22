@@ -423,17 +423,6 @@ void handle_signature_ps(
       break;
     }
     signature_handlers.push_back([=](SignatureContext &ctx) {
-      if (siv == microsoft::D3D10_SB_NAME_PRIMITIVE_ID && ctx.gs_primitive_id) {
-        // AnyOS: behind a geometry shader that wrote SV_PrimitiveID, read its
-        // vertex attribute; Metal's [[primitive_id]] behind a mesh function
-        // counts primitives inside the threadgroup.
-        auto stage_in = ctx.func_signature.DefineInput(InputFragmentStageIn{
-          .user = "anyos_primitive_id", .type = msl_uint,
-          .interpolation = Interpolation::flat, .pull_mode = false
-        });
-        ctx.prologue << init_input_reg(stage_in, reg, mask);
-        return;
-      }
       ctx.prologue << init_input_reg(assigned_index, reg, mask);
     });
     max_input_register = std::max(reg + 1, max_input_register);
@@ -1145,26 +1134,7 @@ handle_signature_gs(
     break;
   }
   case D3D10_SB_OPCODE_DCL_OUTPUT_SGV: {
-    // AnyOS: SV_PrimitiveID written by the geometry shader goes to the pixel
-    // shader as a flat per-vertex attribute (a per-primitive user attribute
-    // crashes Apple's MTLCompilerService on M1, see SPIRV-Cross 0130).
-    unsigned reg = Inst.m_Operands[0].m_Index[0].m_RegIndex;
-    auto mask = Inst.m_Operands[0].m_WriteMask >> 4;
-    if (Inst.m_OutputDeclSGV.Name != D3D10_SB_NAME_PRIMITIVE_ID) {
-      assert(0 && "unhandled geometry shader output sgv");
-      break;
-    }
-    sm50_shader->gs_writes_primitive_id = true;
-    auto const mesh_vertex_data_index = num_mesh_vertex_data++;
-    func_signature.DefineMeshVertexOutput(OutputMeshData{
-      .user = "anyos_primitive_id",
-      .type = msl_uint,
-      .index = mesh_vertex_data_index
-    });
-    mesh_output_handlers.push_back([=](MeshOutputContext& output) -> IREffect {
-      return pop_mesh_output_vertex_data(reg, mask, mesh_vertex_data_index, output.vertex_id, msl_uint);
-    });
-    max_output_register = std::max(reg + 1, max_output_register);
+    assert(0 && "unhandled geometry shader output sgv");
     break;
   }
   case D3D10_SB_OPCODE_DCL_OUTPUT_SIV: {
