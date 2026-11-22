@@ -55,15 +55,6 @@ bool is_default_dyn_##name(void) \
 \
 const char *get_dyn_##name(void) \
 {\
-	/* AnyOS: a relocatable install names its directories through the \
-	 * environment (SAMBA_DYN_<NAME>), taken once, before anything set \
-	 * the value. */ \
-	if (is_default_dyn_##name()) { \
-		const char *env = getenv("SAMBA_DYN_" #name); \
-		if (env != NULL && *env != '\0') { \
-			set_dyn_##name(env); \
-		} \
-	} \
 	return dyn_##name;\
 }\
 \
