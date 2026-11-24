@@ -64,7 +64,14 @@
 #define VKD3D_MAX_MUTABLE_DESCRIPTOR_TYPES 6u
 #define VKD3D_MAX_DESCRIPTOR_SIZE 256u /* Maximum allowed value in VK_EXT_descriptor_buffer/heap. */
 
-#define VKD3D_MIN_VIEW_DESCRIPTOR_COUNT D3D12_MAX_SHADER_VISIBLE_DESCRIPTOR_HEAP_SIZE_TIER_2
+/* AnyOS: the descriptor heap size follows the device.  MoltenVK reports 31
+ * update-after-bind buffers and 128 images per stage on direct Metal bindings
+ * and the Tier 2 limits (1M) with Metal argument buffers; upstream insists on
+ * the D3D12 tier-2 heap size and refuses the former.  The view heap size is
+ * computed per device (vkd3d_bindless_state_init_limits, at least this floor)
+ * and read through d3d12_device_get_max_descriptor_heap_size. */
+#define VKD3D_MIN_VIEW_DESCRIPTOR_COUNT 31u
+#define VKD3D_MAX_VIEW_DESCRIPTOR_COUNT D3D12_MAX_SHADER_VISIBLE_DESCRIPTOR_HEAP_SIZE_TIER_2
 #define VKD3D_MIN_SAMPLER_DESCRIPTOR_COUNT D3D12_MAX_SHADER_VISIBLE_SAMPLER_HEAP_SIZE
 
 #define VKD3D_TILE_SIZE (65536ull)
@@ -184,6 +191,7 @@ struct vkd3d_vulkan_info
     bool EXT_image_sliced_view_of_3d;
     bool EXT_graphics_pipeline_library;
     bool EXT_fragment_shader_interlock;
+    bool EXT_sample_locations;
     bool EXT_pageable_device_local_memory;
     bool EXT_memory_priority;
     bool EXT_dynamic_rendering_unused_attachments;
@@ -2196,6 +2204,7 @@ enum vkd3d_dynamic_state_flag
     VKD3D_DYNAMIC_STATE_STENCIL_WRITE_MASK    = (1 << 11),
     VKD3D_DYNAMIC_STATE_DEPTH_BIAS            = (1 << 12),
     VKD3D_DYNAMIC_STATE_RASTERIZATION_SAMPLES = (1 << 13),
+    VKD3D_DYNAMIC_STATE_SAMPLE_LOCATIONS      = (1 << 14),
 };
 
 struct vkd3d_shader_debug_ring_spec_constants
@@ -2924,6 +2933,20 @@ struct vkd3d_dynamic_state
     } fragment_shading_rate;
 
     uint32_t pipeline_stack_size;
+
+    /* SetSamplePositions: sample_count 0 is the standard pattern. Positions are
+     * pixel-major (1 pixel, or a 2x2 quad in D3D12 order), 1/16 pixel units around
+     * the pixel centre. emitted_samples is the per-pixel count last given to
+     * vkCmdSetSampleLocationsEXT (0: not emitted in this command buffer state). */
+    struct
+    {
+        uint8_t sample_count;
+        uint8_t pixel_count;
+        D3D12_SAMPLE_POSITION positions[4 * 16];
+        VkSampleCountFlagBits emitted_samples;
+        /* Viewport translation emulating a single-sample position (0: none). */
+        float viewport_shift_x, viewport_shift_y;
+    } sample_positions;
 };
 
 /* ID3D12CommandList */
@@ -4573,6 +4596,10 @@ struct vkd3d_bindless_set_info
 struct vkd3d_bindless_state
 {
     uint32_t flags; /* vkd3d_bindless_flags */
+    /* AnyOS: CBV_SRV_UAV descriptors one Vulkan descriptor set per type can
+     * hold on this device (VKD3D_MIN_VIEW_DESCRIPTOR_COUNT ..
+     * VKD3D_MAX_VIEW_DESCRIPTOR_COUNT), see vkd3d_bindless_state_init_limits. */
+    uint32_t max_view_descriptors;
 
     /* Shared between heap and legacy. */
     size_t cbv_srv_uav_size;
@@ -5340,6 +5367,7 @@ struct vkd3d_physical_device_info
     VkPhysicalDeviceAccelerationStructurePropertiesKHR acceleration_structure_properties;
     VkPhysicalDeviceFragmentShadingRatePropertiesKHR fragment_shading_rate_properties;
     VkPhysicalDeviceConservativeRasterizationPropertiesEXT conservative_rasterization_properties;
+    VkPhysicalDeviceSampleLocationsPropertiesEXT sample_locations_properties;
     VkPhysicalDeviceDeviceGeneratedCommandsPropertiesEXT device_generated_commands_properties;
     VkPhysicalDeviceMeshShaderPropertiesEXT mesh_shader_properties;
     VkPhysicalDeviceShaderModuleIdentifierPropertiesEXT shader_module_identifier_properties;
@@ -6880,6 +6908,13 @@ static inline VkExtent3D d3d12_resource_desc_get_padded_feedback_extent(const D3
         result.width += ENCODED_REGION_ALIGNMENT;
     if (result.height < active_result.height)
         result.height += ENCODED_REGION_ALIGNMENT;
+
+    /* AnyOS: Metal has no 64-bit image atomicOr, so each 64-bit feedback texel is
+     * stored as two R32_UINT texels side by side: x = 2 * region_x + plane, where
+     * plane 0 holds mips 0-7 and plane 1 holds mips 8-14 plus the encoded MinMip
+     * in its top 4 bits. The image is twice as wide; shaders recover the encoded
+     * region width from bits 1..4 of the image width. */
+    result.width *= 2;
 
     return result;
 }

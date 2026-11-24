@@ -629,3 +629,137 @@ struct DXMTClearUintMetadata {
 [[kernel]] void tile_barrier(ushort2 pos [[thread_position_in_threadgroup]]) {
   // empty
 }
+
+
+// ---------------------------------------------------------------------------
+// AnyOS: domain shader stream output.  counters[12] is the number of workload
+// records the tessellation pass wrote (uint4: patch, first primitive within
+// the patch, first index, primitive count), counters[14] is set when one of
+// its stream buffers was too small.
+
+#include <metal_atomic>
+#include <metal_integer>
+
+[[kernel]] void so_scan(
+    device uint *patch_offsets [[buffer(0)]],
+    device const uint4 *records [[buffer(1)]],
+    device const uint *counters [[buffer(2)]],
+    device DXMTStreamOutputState &state [[buffer(3)]],
+    constant DXMTStreamOutputDraw &p [[buffer(4)]],
+    device uint *filled0 [[buffer(5)]],
+    device uint *filled1 [[buffer(6)]],
+    device uint *filled2 [[buffer(7)]],
+    device uint *filled3 [[buffer(8)]],
+    device atomic_uint *query0 [[buffer(9)]],
+    device atomic_uint *query1 [[buffer(10)]],
+    device atomic_uint *query2 [[buffer(11)]],
+    device atomic_uint *query3 [[buffer(12)]],
+    uint tid [[thread_position_in_threadgroup]],
+    uint tg [[threads_per_threadgroup]]
+) {
+  threadgroup uint partial[1024];
+  threadgroup uint total;
+  uint patches = p.patch_count;
+  for (uint i = tid; i < patches; i += tg)
+    patch_offsets[i] = 0;
+  threadgroup_barrier(mem_flags::mem_device);
+  uint record_count = min(counters[12], p.record_capacity);
+  for (uint i = tid; i < record_count; i += tg) {
+    uint4 r = records[i];
+    if (r.x < patches)
+      atomic_fetch_add_explicit((device atomic_uint *)&patch_offsets[r.x], r.w, memory_order_relaxed);
+  }
+  threadgroup_barrier(mem_flags::mem_device);
+  uint chunk = (patches + tg - 1) / tg;
+  uint begin = min(tid * chunk, patches);
+  uint end = min(begin + chunk, patches);
+  uint sum = 0;
+  for (uint i = begin; i < end; i++)
+    sum += patch_offsets[i];
+  partial[tid] = sum;
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+  if (tid == 0) {
+    uint acc = 0;
+    for (uint i = 0; i < tg; i++) {
+      uint v = partial[i];
+      partial[i] = acc;
+      acc += v;
+    }
+    total = acc;
+  }
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+  uint acc = partial[tid];
+  for (uint i = begin; i < end; i++) {
+    uint v = patch_offsets[i];
+    patch_offsets[i] = acc;
+    acc += v;
+  }
+  if (tid != 0)
+    return;
+  device uint *filled[4] = {filled0, filled1, filled2, filled3};
+  uint needed = total;
+  uint written = needed;
+  uint base[4] = {0, 0, 0, 0};
+  for (uint s = 0; s < 4; s++) {
+    if (!(p.slot_mask & (1u << s)))
+      continue;
+    base[s] = *filled[s];
+    uint per = p.stride[s] * p.vertices_per_primitive;
+    uint capacity = (per && base[s] < p.buffer_size[s]) ? (p.buffer_size[s] - base[s]) / per : 0;
+    written = min(written, capacity);
+  }
+  for (uint s = 0; s < 4; s++) {
+    state.base[s] = base[s];
+    if (p.slot_mask & (1u << s))
+      *filled[s] = base[s] + written * p.stride[s] * p.vertices_per_primitive;
+  }
+  state.written = written;
+  state.needed = needed;
+  state.overflow = counters[14];
+  device atomic_uint *queries[4] = {query0, query1, query2, query3};
+  for (uint q = 0; q < p.query_count && q < 4; q++) {
+    atomic_fetch_add_explicit(&queries[q][0], written, memory_order_relaxed);
+    atomic_fetch_add_explicit(&queries[q][1], needed, memory_order_relaxed);
+  }
+}
+
+[[kernel]] void so_write(
+    device const uint4 *records [[buffer(0)]],
+    device const uint *patch_offsets [[buffer(1)]],
+    device const uint *counters [[buffer(2)]],
+    device const DXMTStreamOutputState &state [[buffer(3)]],
+    constant DXMTStreamOutputDraw &p [[buffer(4)]],
+    device uint *so0 [[buffer(5)]],
+    device uint *so1 [[buffer(6)]],
+    device uint *so2 [[buffer(7)]],
+    device uint *so3 [[buffer(8)]],
+    device const uint4 *vertices [[buffer(9)]],
+    device const uint *indices [[buffer(10)]],
+    constant uint4 *elements [[buffer(11)]],
+    uint tid [[thread_position_in_grid]]
+) {
+  uint record_count = min(counters[12], p.record_capacity);
+  if (tid >= record_count)
+    return;
+  uint4 r = records[tid];
+  if (r.x >= p.patch_count)
+    return;
+  device uint *so[4] = {so0, so1, so2, so3};
+  uint first = patch_offsets[r.x] + r.y;
+  uint vpp = p.vertices_per_primitive;
+  for (uint k = 0; k < r.w; k++) {
+    uint g = first + k;
+    if (g >= state.written)
+      break;
+    for (uint v = 0; v < vpp; v++) {
+      device const uint4 *regs = vertices + indices[r.z + k * vpp + v] * p.registers;
+      for (uint e = 0; e < p.element_count; e++) {
+        uint4 el = elements[e];
+        if (el.x >= p.registers || el.z > 3 || !(p.slot_mask & (1u << el.z)))
+          continue;
+        uint byte = state.base[el.z] + (g * vpp + v) * p.stride[el.z] + el.w;
+        so[el.z][byte >> 2] = regs[el.x][el.y];
+      }
+    }
+  }
+}
