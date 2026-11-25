@@ -475,8 +475,6 @@ public:
 
   uint32_t UAVOnlySampleCount() { return std::max(1u, desc_.ForcedSampleCount); }
 
-  uint32_t TIRSampleCount() { return desc_.ForcedSampleCount > 1 ? desc_.ForcedSampleCount : 0; }
-
 private:
   const D3D11_RASTERIZER_DESC2 desc_;
   MTLD3D10RasterizerState d3d10_;

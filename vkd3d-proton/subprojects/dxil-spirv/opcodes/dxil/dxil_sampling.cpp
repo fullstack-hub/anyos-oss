@@ -2259,16 +2259,8 @@ static spv::Id emit_mip_region_size_log2(Converter::Impl &impl, const llvm::Call
 		feedback_size_id = query_feedback_size->id;
 	}
 
-	// AnyOS: the two 32-bit planes interleave in X, so the image is twice as
-	// wide as the padded feedback map and the encoded width sits one bit up.
-	auto *plane_size = impl.allocate(spv::OpShiftRightLogical, ivec_type);
-	plane_size->add_id(feedback_size_id);
-	plane_size->add_id(builder.makeCompositeConstant(ivec_type,
-	                                                 { builder.makeIntConstant(1), builder.makeIntConstant(0) }));
-	impl.add(plane_size);
-
 	auto *masked_size = impl.allocate(spv::OpBitwiseAnd, ivec_type);
-	masked_size->add_id(plane_size->id);
+	masked_size->add_id(feedback_size_id);
 	masked_size->add_id(impl.build_splat_constant_vector(i32_type, builder.makeIntConstant(15), 2));
 	impl.add(masked_size);
 
@@ -2723,63 +2715,37 @@ bool emit_write_sampler_feedback_instruction(DXIL::Op opcode, Converter::Impl &i
 			merged_bit = or_op->id;
 		}
 
-		// AnyOS: 4 bits per mip in two 32-bit planes. Plane 0 (texel 2x) holds
-		// mips 0-7, plane 1 (texel 2x+1) mips 8-14; one write touches one mip,
-		// so a single 32-bit atomicOr is equivalent to the 64-bit one.
-		spv::Id u32_type = builder.makeUintType(32);
-		auto *bits_u32 = impl.allocate(spv::OpBitcast, u32_type);
-		bits_u32->add_id(merged_bit);
-		impl.add(bits_u32);
-
-		auto *lod_in_plane = impl.allocate(spv::OpBitwiseAnd, i32_type);
-		lod_in_plane->add_id(lod_id);
-		lod_in_plane->add_id(builder.makeIntConstant(7));
-		impl.add(lod_in_plane);
+		spv::Id u64_type = builder.makeUintType(64);
+		auto *u64_conv = impl.allocate(spv::OpSConvert, u64_type);
+		u64_conv->add_id(merged_bit);
+		impl.add(u64_conv);
 
 		auto *shamt = impl.allocate(spv::OpIMul, i32_type);
-		shamt->add_id(lod_in_plane->id);
+		shamt->add_id(lod_id);
 		shamt->add_id(builder.makeIntConstant(4));
 		impl.add(shamt);
 
-		auto *shift_op = impl.allocate(spv::OpShiftLeftLogical, u32_type);
-		shift_op->add_id(bits_u32->id);
-		shift_op->add_id(shamt->id);
+		auto *shamt64 = impl.allocate(spv::OpSConvert, u64_type);
+		shamt64->add_id(shamt->id);
+		impl.add(shamt64);
+
+		auto *shift_op = impl.allocate(spv::OpShiftLeftLogical, u64_type);
+		shift_op->add_id(u64_conv->id);
+		shift_op->add_id(shamt64->id);
 		impl.add(shift_op);
 
-		auto *plane = impl.allocate(spv::OpShiftRightArithmetic, i32_type);
-		plane->add_id(lod_id);
-		plane->add_id(builder.makeIntConstant(3));
-		impl.add(plane);
-
-		auto *region_x = impl.allocate(spv::OpCompositeExtract, i32_type);
-		region_x->add_id(lo_int->id);
-		region_x->add_literal(0);
-		impl.add(region_x);
-
-		auto *region_y = impl.allocate(spv::OpCompositeExtract, i32_type);
-		region_y->add_id(lo_int->id);
-		region_y->add_literal(1);
-		impl.add(region_y);
-
-		auto *texel_x2 = impl.allocate(spv::OpShiftLeftLogical, i32_type);
-		texel_x2->add_id(region_x->id);
-		texel_x2->add_id(builder.makeIntConstant(1));
-		impl.add(texel_x2);
-
-		auto *texel_x = impl.allocate(spv::OpBitwiseOr, i32_type);
-		texel_x->add_id(texel_x2->id);
-		texel_x->add_id(plane->id);
-		impl.add(texel_x);
-
 		spv::Id comp_id;
+		if (int_layer_id)
 		{
 			auto *comp = impl.allocate(spv::OpCompositeConstruct, builder.makeVectorType(i32_type, num_coords_full));
-			comp->add_id(texel_x->id);
-			comp->add_id(region_y->id);
-			if (int_layer_id)
-				comp->add_id(int_layer_id);
+			comp->add_id(lo_int->id);
+			comp->add_id(int_layer_id);
 			impl.add(comp);
 			comp_id = comp->id;
+		}
+		else
+		{
+			comp_id = lo_int->id;
 		}
 
 		spv::Id participate_id;
@@ -2811,24 +2777,20 @@ bool emit_write_sampler_feedback_instruction(DXIL::Op opcode, Converter::Impl &i
 				participate_id = lods.trilinear_enable_id;
 		}
 
-		// AnyOS: reference the feedback map's global variable (and descriptor
-		// index) inside the helper, see SPIRVModule build_feedback_write().
-		spv::Id base_var_id = meta.var_id;
-		spv::Id index_id = 0;
-		auto chain_itr = impl.resource_access_chain_base.find(meta.var_id);
-		if (chain_itr != impl.resource_access_chain_base.end())
-		{
-			base_var_id = chain_itr->second.base_var_id;
-			index_id = chain_itr->second.index_id;
-		}
+		HelperCall helper_call;
+		if (num_coords_full == 3 && meta.non_uniform)
+			helper_call = HelperCall::AtomicImageArrayR64CompactNonUniform;
+		else if (num_coords_full == 3)
+			helper_call = HelperCall::AtomicImageArrayR64Compact;
+		else if (meta.non_uniform)
+			helper_call = HelperCall::AtomicImageR64CompactNonUniform;
+		else
+			helper_call = HelperCall::AtomicImageR64Compact;
 
-		const spv::Id aux_ids[4] = { base_var_id, spv::Id(num_coords_full == 3), spv::Id(index_id != 0),
-		                             spv::Id(meta.non_uniform) };
-		spv::Id call_id = impl.spirv_module.get_helper_call_id(HelperCall::AtomicImageR64Compact, aux_ids, 4);
+		spv::Id call_id = impl.spirv_module.get_helper_call_id(helper_call);
 		auto *call = impl.allocate(spv::OpFunctionCall, builder.makeVoidType());
 		call->add_id(call_id);
-		if (index_id)
-			call->add_id(index_id);
+		call->add_id(meta.var_id);
 		call->add_id(comp_id);
 		call->add_id(shift_op->id);
 		call->add_id(participate_id);
