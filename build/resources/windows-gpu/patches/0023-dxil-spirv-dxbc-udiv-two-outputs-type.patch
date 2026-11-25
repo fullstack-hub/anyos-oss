@@ -1,0 +1,29 @@
+dxil-spirv (vkd3d-proton subproject): DXBC udiv with two outputs on the operand type
+
+The D3D12 runtime converts every fxc shader to DXIL for a driver that
+reports shader model 6 (the AnyOS D3D12 UMD).  A DXBC `udiv` (quotient and
+remainder) becomes dx.op.udiv returning dx.types.twoi32; its converter built
+the UDiv/UMod helper functions and the two calls with that struct as the
+integer type, so the helpers took struct parameters and were called with
+i32 arguments -- invalid SPIR-V that SPIRV-Cross rejects ("Invalid bit
+width") and any other consumer mis-compiles.  Every such shader failed its
+PSO; found through a hull shader whose patch-constant phase indexes its
+control points.  The helpers and calls now use the operand type, and the
+pair is rebuilt as before.
+
+diff --git a/subprojects/dxil-spirv/opcodes/dxil/dxil_arithmetic.cpp b/subprojects/dxil-spirv/opcodes/dxil/dxil_arithmetic.cpp
+index 366be9a3..083f22bf 100644
+--- a/subprojects/dxil-spirv/opcodes/dxil/dxil_arithmetic.cpp
++++ b/subprojects/dxil-spirv/opcodes/dxil/dxil_arithmetic.cpp
+@@ -572,7 +572,10 @@ bool emit_dxbc_udiv_instruction(Converter::Impl &impl, const llvm::CallInst *ins
+ 	spv::Id id0 = impl.get_id_for_value(instruction->getOperand(1));
+ 	spv::Id id1 = impl.get_id_for_value(instruction->getOperand(2));
+ 
+-	spv::Id type_id = impl.get_type_id(instruction->getType());
++	// The call returns dx.types.twoi32 {quotient, remainder}; the helpers and
++	// both calls work on the operand type (the struct as a helper type gave
++	// invalid SPIR-V: struct parameters called with i32 arguments).
++	spv::Id type_id = impl.get_type_id(instruction->getOperand(1)->getType());
+ 	spv::Id quot_id = impl.spirv_module.get_helper_call_id(HelperCall::UDiv, type_id);
+ 	spv::Id rem_id = impl.spirv_module.get_helper_call_id(HelperCall::UMod, type_id);
+ 

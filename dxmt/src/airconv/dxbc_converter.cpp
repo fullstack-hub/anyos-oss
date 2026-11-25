@@ -253,6 +253,8 @@ llvm::Error convert_dxbc_pixel_shader(
   uint32_t pso_unorm_output_reg_mask = 0;
   uint32_t pso_uint_output_reg_mask = 0;
   uint32_t pso_sint_output_reg_mask = 0;
+  bool pso_gs_primitive_id = false;
+  uint32_t pso_forced_coverage_mask = 0;
   SM50_SHADER_PSO_PIXEL_SHADER_DATA *pso_data = nullptr;
   if (args_get_data<SM50_SHADER_PSO_PIXEL_SHADER, SM50_SHADER_PSO_PIXEL_SHADER_DATA>(pArgs, &pso_data)) {
     pso_dual_source_blending = pso_data->dual_source_blending;
@@ -261,6 +263,8 @@ llvm::Error convert_dxbc_pixel_shader(
     pso_uint_output_reg_mask = pso_data->uint_output_reg_mask;
     pso_sint_output_reg_mask = pso_data->sint_output_reg_mask;
     pso_sample_mask = pso_data->sample_mask;
+    pso_gs_primitive_id = pso_data->gs_primitive_id;
+    pso_forced_coverage_mask = pso_data->forced_coverage_mask;
   }
   SM50_SHADER_METAL_VERSION metal_version = SM50_SHADER_METAL_310;
   SM50_SHADER_FLAG shader_flags = {};
@@ -292,9 +296,21 @@ llvm::Error convert_dxbc_pixel_shader(
     sig_ctx.unorm_output_reg_mask = pso_unorm_output_reg_mask;
     sig_ctx.uint_output_reg_mask = pso_uint_output_reg_mask;
     sig_ctx.sint_output_reg_mask = pso_sint_output_reg_mask;
+    sig_ctx.gs_primitive_id = pso_gs_primitive_id;
     for (auto &p : pShaderInternal->signature_handlers) {
       p(sig_ctx);
     }
+  }
+  if (pso_forced_coverage_mask) {
+    // AnyOS: target-independent rasterization -- SV_Coverage reads the
+    // forced sample count's full mask instead of Metal's one-sample coverage
+    // (the signature handler above bound coverage_mask_arg to the
+    // [[sample_mask]] input; reads still AND it with pso_sample_mask).
+    prologue << make_effect([=](struct context ctx) {
+      if (ctx.resource.coverage_mask_arg)
+        ctx.resource.coverage_mask_arg = ctx.builder.getInt32(pso_forced_coverage_mask);
+      return std::monostate{};
+    });
   }
   if (pso_sample_mask != 0xffffffff) {
     auto assigned_index =
@@ -1226,6 +1242,11 @@ AIRCONV_API int SM50Initialize(
           inputParser, outputParser, pRefl->GeometryShader.Data
         );
       }
+      // AnyOS: SV_PrimitiveID output needs the geometry pipeline (the pixel
+      // shader reads the geometry shader's attribute)
+      if (sm50_shader->gs_writes_primitive_id)
+        pRefl->GeometryShader.GSPassThrough = ~0u;
+      pRefl->GeometryShader.WritesPrimitiveID = sm50_shader->gs_writes_primitive_id;
       pRefl->GeometryShader.Primitive = sm50_shader->gs_input_primitive;
     }
     if (sm50_shader->shader_type == microsoft::D3D10_SB_PIXEL_SHADER) {

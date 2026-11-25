@@ -1477,10 +1477,20 @@ int vkd3d_shader_compile_dxil(const struct vkd3d_shader_code *dxbc,
         goto end;
     }
 
+    /* A hull shader whose control point phase is an implicit pass-through
+     * has no entry function: the D3D12 runtime's DXBC->DXIL conversion
+     * (what a driver advertising SM 6 receives for every fxc shader) lists
+     * it in dx.entryPoints with a null function and an empty name.  The
+     * converter handles it (it synthesizes the pass-through); only the
+     * quirk lookup has no name to match. */
     if (dxil_spv_parsed_blob_get_entry_point_demangled_name(blob, 0, &quirk_entry) != DXIL_SPV_SUCCESS)
     {
-        ret = VKD3D_ERROR_INVALID_SHADER;
-        goto end;
+        if (dxil_spv_parsed_blob_get_shader_stage(blob) != DXIL_SPV_STAGE_HULL)
+        {
+            ret = VKD3D_ERROR_INVALID_SHADER;
+            goto end;
+        }
+        quirk_entry = NULL;
     }
 
     quirks = vkd3d_shader_compile_arguments_select_quirks(compiler_args, hash, quirk_entry);
