@@ -184,9 +184,8 @@ AllocateShmLinearTexture2D(
 
   Flags<TextureAllocationFlag> flags;
   flags.set(TextureAllocationFlag::Shared);
-  /* Never GpuReadonly: an imported texture is always DEFAULT
-   * (ImportSharedTexture), and the producer creates an IMMUTABLE one empty
-   * and uploads into it on the command stream, which has to be tracked. */
+  if (finalDesc.Usage == D3D11_USAGE_IMMUTABLE)
+    flags.set(TextureAllocationFlag::GpuReadonly);
   if (!(finalDesc.BindFlags & (D3D11_BIND_UNORDERED_ACCESS | D3D11_BIND_RENDER_TARGET | D3D11_BIND_DEPTH_STENCIL)))
     flags.set(TextureAllocationFlag::ShaderReadonly);
 

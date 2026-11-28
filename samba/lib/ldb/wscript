@@ -353,7 +353,7 @@ def build(bld):
                      deps='cmocka ldb',
                      install=False)
 
-    bld.SAMBA_BINARY('test_ldb_comparison_fold', enabled=False,
+    bld.SAMBA_BINARY('test_ldb_comparison_fold',
                      source='tests/test_ldb_comparison_fold.c',
                      deps='cmocka ldb ldbwrap',
                      install=False)
