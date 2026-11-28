@@ -87,7 +87,13 @@ public:
     if (!m_parent->IsTraced() && pDesc->Usage == D3D11_USAGE_DYNAMIC)
       flags.set(BufferAllocationFlag::CpuWriteCombined);
     // if (pDesc->Usage != D3D11_USAGE_DEFAULT)
-    if (pDesc->Usage == D3D11_USAGE_IMMUTABLE)
+    /* GpuReadonly is NoTracking: no encoder waits for a write to the
+     * allocation.  That holds only when the contents come with the create
+     * call.  An IMMUTABLE buffer created empty is filled afterwards by
+     * UpdateSubresource, a blit on the command stream (the native embedder
+     * delivers a guest's initial data this way), so its readers need the
+     * fences a DEFAULT buffer gets. */
+    if (pDesc->Usage == D3D11_USAGE_IMMUTABLE && pInitialData)
       flags.set(BufferAllocationFlag::GpuReadonly);
     if (pDesc->Usage != D3D11_USAGE_DYNAMIC) {
       if (pInitialData)
